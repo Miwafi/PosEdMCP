@@ -28,6 +28,7 @@ import org.luaj.vm2.lib.jse.JseMathLib;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.io.Reader;
@@ -37,7 +38,9 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -74,6 +77,10 @@ public final class LuaRuntime {
     private static final int MAX_TABLE_ENTRIES = 100;
     private static final int MAX_ARRAY_ENTRIES = 100_000;
     public static final int DB_ROW_LIMIT = 200;
+
+    /** Every SQLite file starts with this, NUL included. */
+    private static final byte[] SQLITE_MAGIC =
+            "SQLite format 3\u0000".getBytes(StandardCharsets.US_ASCII);
 
     private LuaRuntime() {
     }
@@ -607,9 +614,11 @@ public final class LuaRuntime {
      * reading its file, which app.read already offers.
      */
     private static LuaValue openDatabase(String path, List<SQLiteDatabase> opened) {
-        if (!new File(path).exists()) {
+        File file = new File(path);
+        if (!file.exists()) {
             throw new LuaError("no database at " + path);
         }
+        requireSqliteFile(file, path);
         SQLiteDatabase database;
         try {
             database = SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READONLY);
@@ -628,6 +637,39 @@ public final class LuaRuntime {
             return rows.length() > 0 ? rows.get(1) : LuaValue.NIL;
         }));
         return handle;
+    }
+
+    /**
+     * Refuses a file that cannot be a database, before a handle is handed back.
+     *
+     * <p>{@code SQLiteDatabase.openDatabase} is lazy: it does not look at the
+     * file until the first statement. Without this, a script walking a
+     * {@code databases/} directory gets a handle back for every {@code -wal},
+     * {@code -shm} and {@code -journal} file sitting beside the real databases,
+     * {@code pcall(app.db, path)} succeeds, and the failure surfaces later at the
+     * first query as "file is not a database" blamed on the query. Checking the
+     * header puts the refusal where the mistake was made.
+     *
+     * <p>An empty file is allowed: SQLite leaves one behind before the first
+     * write and treats it as an empty database, so refusing it would be wrong.
+     */
+    private static void requireSqliteFile(File file, String path) {
+        if (file.length() == 0) {
+            return;
+        }
+        byte[] header = new byte[SQLITE_MAGIC.length];
+        int read;
+        try (InputStream in = new FileInputStream(file)) {
+            read = in.read(header);
+        } catch (Throwable t) {
+            throw new LuaError("could not read " + path + ": " + messageOf(t));
+        }
+        if (read == SQLITE_MAGIC.length && Arrays.equals(header, SQLITE_MAGIC)) {
+            return;
+        }
+        throw new LuaError(path + " is not a SQLite database. The -wal, -shm and -journal files"
+                + " beside a real one are not databases, and neither is anything else in that"
+                + " directory.");
     }
 
     private static LuaValue databaseTables(SQLiteDatabase database) {

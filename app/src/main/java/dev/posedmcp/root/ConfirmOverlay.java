@@ -1,41 +1,47 @@
 package dev.posedmcp.root;
 
 import android.content.Context;
-import android.graphics.Color;
+import android.content.res.ColorStateList;
 import android.graphics.PixelFormat;
 import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
-import android.widget.Button;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import androidx.appcompat.view.ContextThemeWrapper;
+
+import com.google.android.material.button.MaterialButton;
+import com.google.android.material.card.MaterialCardView;
+import com.google.android.material.color.MaterialColors;
+
 import dev.posedmcp.Logx;
+import dev.posedmcp.R;
 
 /**
  * The modal that a privileged request has to pass through.
  *
  * <p>It is an application overlay rather than an activity so that it can appear
  * while another app is in the foreground, and so a stray tap on the app
- * underneath cannot approve anything. The command is rendered verbatim: what
- * the user reads is exactly what {@code su} will run.
+ * underneath cannot approve anything. The command is rendered verbatim: what the
+ * user reads is exactly what {@code su} will run.
+ *
+ * <p>Styled with Material 3 like the rest of the app, which means the views are
+ * built against a themed wrapper of the caller's context - an overlay has no
+ * activity, so nothing would apply the app's theme to it otherwise, and Material
+ * components refuse to build against a theme that is not a Material one.
+ * Everything here is the most-confirmed surface of the app, so it is worth the
+ * one wrapper.
  */
 final class ConfirmOverlay {
-
-    private static final int COLOR_BG = 0xFF1B1F23;
-    private static final int COLOR_PANEL = 0xFF0E1114;
-    private static final int COLOR_TEXT = 0xFFE6E6E6;
-    private static final int COLOR_MUTED = 0xFF9AA4AE;
-    private static final int COLOR_ACCENT = 0xFF7FBF6A;
-    private static final int COLOR_DANGER = 0xFFD96C6C;
-    private static final int COLOR_NEUTRAL = 0xFF3A4249;
 
     private ConfirmOverlay() {
     }
@@ -122,65 +128,84 @@ final class ConfirmOverlay {
         int screenW = ctx.getResources().getDisplayMetrics().widthPixels;
         int screenH = ctx.getResources().getDisplayMetrics().heightPixels;
 
-        LinearLayout card = new LinearLayout(ctx);
-        card.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(ctx, 18);
-        card.setPadding(pad, pad, pad, pad);
-        card.setBackground(rounded(COLOR_BG, dp(ctx, 16)));
+        Context themed = new ContextThemeWrapper(ctx, R.style.Theme_PosEdMCP);
 
-        LinearLayout header = new LinearLayout(ctx);
+        MaterialCardView card = new MaterialCardView(themed);
+        card.setRadius(dp(themed, 24));
+        card.setCardElevation(dp(themed, 8));
+        card.setCardBackgroundColor(role(card, com.google.android.material.R.attr
+                .colorSurfaceContainerHigh));
+
+        LinearLayout content = new LinearLayout(themed);
+        content.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(themed, 20);
+        content.setPadding(pad, pad, pad, pad);
+        card.addView(content, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        LinearLayout header = new LinearLayout(themed);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        header.addView(titleView(ctx, req.title, 17f, COLOR_TEXT, true),
-                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        header.addView(title(themed, req.title), new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
-        TextView countdown = new TextView(ctx);
-        countdown.setTextColor(COLOR_MUTED);
-        countdown.setTextSize(13f);
+        TextView countdown = caption(themed);
         header.addView(countdown);
-        card.addView(header);
+        content.addView(header);
 
         if (!TextUtils.isEmpty(req.requester)) {
-            TextView who = new TextView(ctx);
-            who.setText("Requested by: " + req.requester);
-            who.setTextColor(COLOR_MUTED);
-            who.setTextSize(12f);
-            card.addView(who, topMargin(ctx, 4));
+            content.addView(caption(themed, "Requested by: " + req.requester),
+                    topMargin(themed, 4));
         }
 
-        card.addView(sectionLabel(ctx, "COMMAND", COLOR_DANGER));
-        card.addView(scrollingBlock(ctx, req.detail, true), weighted(ctx, 6));
+        content.addView(sectionLabel(themed, "COMMAND",
+                        role(card, androidx.appcompat.R.attr.colorError)),
+                topMargin(themed, 16));
+        content.addView(scrollingBlock(themed, card, req.detail, true), weighted(themed, 6));
 
         if (!TextUtils.isEmpty(req.reason)) {
-            card.addView(sectionLabel(ctx, "STATED REASON", COLOR_ACCENT));
-            card.addView(scrollingBlock(ctx, req.reason, false), weighted(ctx, 6));
+            content.addView(sectionLabel(themed, "STATED REASON",
+                            role(card, androidx.appcompat.R.attr.colorPrimary)),
+                    topMargin(themed, 16));
+            content.addView(scrollingBlock(themed, card, req.reason, false), weighted(themed, 6));
         }
 
-        LinearLayout actions = new LinearLayout(ctx);
+        LinearLayout actions = new LinearLayout(themed);
         actions.setOrientation(LinearLayout.HORIZONTAL);
         actions.setGravity(Gravity.END);
-        card.addView(actions, topMargin(ctx, 14));
+        content.addView(actions, topMargin(themed, 16));
 
-        Button deny = new Button(ctx);
+        MaterialButton deny = new MaterialButton(themed, null,
+                com.google.android.material.R.attr.materialButtonOutlinedStyle);
         deny.setText("Deny");
         deny.setAllCaps(false);
-        deny.setTextColor(COLOR_TEXT);
-        deny.setBackground(rounded(COLOR_NEUTRAL, dp(ctx, 10)));
-        actions.addView(deny, new LinearLayout.LayoutParams(dp(ctx, 104), dp(ctx, 46)));
+        actions.addView(deny);
 
-        Button approve = new Button(ctx);
+        // Root commands are the one kind the app will not let the user relax, so
+        // the affirmative carries the theme's error role for those and the
+        // ordinary primary for everything else. Colour is the only thing telling
+        // the two apart at a glance, which is why it is not the same for both.
+        boolean dangerous = req.kind == ConfirmationGate.Kind.SHELL;
+        int container = dangerous
+                ? role(card, androidx.appcompat.R.attr.colorError)
+                : role(card, androidx.appcompat.R.attr.colorPrimary);
+        int onContainer = dangerous
+                ? role(card, com.google.android.material.R.attr.colorOnError)
+                : role(card, com.google.android.material.R.attr.colorOnPrimary);
+
+        MaterialButton approve = new MaterialButton(themed);
         approve.setText(req.approveLabel());
         approve.setAllCaps(false);
-        approve.setTextColor(Color.BLACK);
-        approve.setBackground(rounded(COLOR_DANGER, dp(ctx, 10)));
-        LinearLayout.LayoutParams approveLp =
-                new LinearLayout.LayoutParams(dp(ctx, 152), dp(ctx, 46));
-        approveLp.leftMargin = dp(ctx, 10);
+        approve.setBackgroundTintList(ColorStateList.valueOf(container));
+        approve.setTextColor(onContainer);
+        LinearLayout.LayoutParams approveLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        approveLp.leftMargin = dp(themed, 10);
         actions.addView(approve, approveLp);
 
         WindowManager.LayoutParams wlp = new WindowManager.LayoutParams(
-                Math.min(dp(ctx, 380), screenW - dp(ctx, 32)),
-                Math.min(dp(ctx, 520), screenH - dp(ctx, 96)),
+                Math.min(dp(themed, 380), screenW - dp(themed, 32)),
+                Math.min(dp(themed, 520), screenH - dp(themed, 96)),
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                         | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
@@ -236,37 +261,54 @@ final class ConfirmOverlay {
         return true;
     }
 
-    private static TextView titleView(Context ctx, String text, float size, int color,
-            boolean bold) {
-        TextView tv = new TextView(ctx);
+    private static TextView title(Context themed, String text) {
+        TextView tv = new TextView(themed);
         tv.setText(text);
-        tv.setTextColor(color);
-        tv.setTextSize(size);
-        if (bold) {
-            tv.setTypeface(Typeface.DEFAULT_BOLD);
-        }
+        tv.setTextAppearance(com.google.android.material.R.style
+                .TextAppearance_Material3_TitleMedium);
         return tv;
     }
 
-    /** A scrollable monospace/text panel, so long commands stay fully readable. */
-    private static ScrollView scrollingBlock(Context ctx, String text, boolean monospace) {
-        TextView tv = new TextView(ctx);
+    private static TextView caption(Context themed) {
+        TextView tv = new TextView(themed);
+        tv.setTextAppearance(com.google.android.material.R.style
+                .TextAppearance_Material3_BodySmall);
+        return tv;
+    }
+
+    private static TextView caption(Context themed, String text) {
+        TextView tv = caption(themed);
         tv.setText(text);
-        tv.setTextColor(COLOR_TEXT);
-        tv.setTextSize(13f);
+        return tv;
+    }
+
+    /** A scrollable panel, so long commands stay fully readable. */
+    private static ScrollView scrollingBlock(Context themed, View carrier, String text,
+            boolean monospace) {
+        TextView tv = new TextView(themed);
+        tv.setText(text);
+        tv.setTextAppearance(com.google.android.material.R.style
+                .TextAppearance_Material3_BodySmall);
         if (monospace) {
             tv.setTypeface(Typeface.MONOSPACE);
         }
         tv.setTextIsSelectable(true);
-        tv.setPadding(dp(ctx, 12), dp(ctx, 10), dp(ctx, 12), dp(ctx, 10));
-        tv.setBackground(rounded(COLOR_PANEL, dp(ctx, 10)));
-        ScrollView scroll = new ScrollView(ctx);
+        tv.setTextColor(role(carrier, com.google.android.material.R.attr.colorOnSurface));
+        int p = dp(themed, 12);
+        tv.setPadding(p, p, p, p);
+        tv.setBackgroundColor(role(carrier, com.google.android.material.R.attr
+                .colorSurfaceContainerHighest));
+        ScrollView scroll = new ScrollView(themed);
         scroll.addView(tv);
         return scroll;
     }
 
-    private static TextView sectionLabel(Context ctx, String text, int color) {
-        TextView tv = titleView(ctx, text, 11f, color, true);
+    private static TextView sectionLabel(Context themed, String text, int color) {
+        TextView tv = new TextView(themed);
+        tv.setText(text);
+        tv.setTextAppearance(com.google.android.material.R.style
+                .TextAppearance_Material3_TitleSmall);
+        tv.setTextColor(color);
         tv.setLetterSpacing(0.08f);
         return tv;
     }
@@ -287,15 +329,13 @@ final class ConfirmOverlay {
         return lp;
     }
 
+    /** Resolves a theme role against a view that is already using the theme. */
+    private static int role(View view, int attribute) {
+        return MaterialColors.getColor(view, attribute);
+    }
+
     private static int dp(Context ctx, float value) {
         return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value,
                 ctx.getResources().getDisplayMetrics());
-    }
-
-    private static GradientDrawable rounded(int color, int radius) {
-        GradientDrawable d = new GradientDrawable();
-        d.setColor(color);
-        d.setCornerRadius(radius);
-        return d;
     }
 }

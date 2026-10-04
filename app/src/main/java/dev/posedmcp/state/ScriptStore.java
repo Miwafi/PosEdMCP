@@ -74,6 +74,14 @@ public final class ScriptStore {
         long now = System.currentTimeMillis();
         for (SavedScript existing : scripts) {
             if (existing.name.equals(name)) {
+                // A different script wearing the same name. The recorded run
+                // belonged to the old one, and leaving it there would show the
+                // user a failure that the script in front of them no longer has.
+                if (!existing.source.equals(source)) {
+                    existing.lastRunAt = 0;
+                    existing.lastRunOk = false;
+                    existing.lastOutcome = "";
+                }
                 existing.packageName = packageName;
                 existing.source = source;
                 existing.effect = effect;
