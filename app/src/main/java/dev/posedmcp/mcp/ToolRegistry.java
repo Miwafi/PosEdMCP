@@ -34,6 +34,8 @@ import dev.posedmcp.root.RootShell;
 import dev.posedmcp.state.DeviceStatus;
 import dev.posedmcp.state.EventStore;
 import dev.posedmcp.state.Prefs;
+import dev.posedmcp.state.SavedScript;
+import dev.posedmcp.state.ScriptStore;
 import dev.posedmcp.tools.Capabilities;
 import dev.posedmcp.xposed.LuaRuntime;
 
@@ -818,9 +820,17 @@ public final class ToolRegistry {
                         + " filter is given"
                         + " \n  app.files(path) - {name=, dir=, size=} per entry"
                         + " \n  app.exists(path), app.read(path[, maxChars])"
+                        + " \n  app.db(path) - a SQLite database inside the app, opened"
+                        + " read-only: db.tables(), db.schema(table), db.query(sql, ...args),"
+                        + " db.one(...). Rows come back as tables keyed by column name. A query"
+                        + " stops at " + LuaRuntime.DB_ROW_LIMIT + " rows and marks the result"
+                        + " truncated when there were more; use LIMIT and OFFSET to page. This"
+                        + " is usually the fastest way to understand an obfuscated app: what it"
+                        + " stores says more than its renamed classes do."
                         + " \n  app.log(text) - into the module log"
                         + " \nThere is no io and no os library; file access goes through"
-                        + " app.files and app.read, which only read."
+                        + " app.files and app.read, and databases through app.db, all of which"
+                        + " only read."
                         + " \n\nstdout and the returned value both come back in the result, and"
                         + " errors carry a line number. app.files raises rather than returning an"
                         + " empty list when it cannot read a directory, so an empty list means the"
@@ -847,13 +857,88 @@ public final class ToolRegistry {
                             forPrompt(source),
                             reason);
 
-                    requireAppPeer(pkg);
-                    JSONObject callArgs = new JSONObject();
-                    callArgs.put("source", source);
-                    callArgs.put("max_instructions",
-                            args.optLong("max_instructions", LuaRuntime.DEFAULT_MAX_INSTRUCTIONS));
-                    JSONObject out = capabilities.appCall(pkg, "lua_exec", callArgs, 30_000L);
-                    out.put("package", pkg);
+                    return McpTool.json(runScript(pkg, source,
+                            args.optLong("max_instructions", LuaRuntime.DEFAULT_MAX_INSTRUCTIONS)));
+                })
+                .build());
+
+        // =================================================================
+        // Saved scripts
+        // =================================================================
+
+        add(McpTool.of("script_save")
+                .title("Save a script to the automation tab")
+                .description("Files a Lua script into the user's library of kept scripts, where"
+                        + " they can open, run or delete it from the app's automation tab."
+                        + " \n\nSaving is not running. It writes to this app's own storage and"
+                        + " changes nothing on the device, so it does not prompt - the boundary"
+                        + " is execution, the same as smali_assemble. The source is compiled"
+                        + " first and the save is refused if it does not parse, so the user"
+                        + " cannot end up with a script that cannot run."
+                        + " \n\nUse it when the user asks for something repeatable, or when a"
+                        + " script has just done something useful: run it with lua_exec first,"
+                        + " then save the version that worked. Saving under the same name"
+                        + " replaces that script instead of adding a second copy."
+                        + " \n\nThe name and the effect line are what the user sees in the list,"
+                        + " so write the effect in their language and say what running it does.")
+                .mutating()
+                .input(props(
+                        "name", McpTool.string("Short name for the script, unique in the library"),
+                        "package", McpTool.string("Target package the script runs inside"),
+                        "source", McpTool.string("The Lua source"),
+                        "effect", McpTool.string("One line, in the user's language: what running"
+                                + " this does")),
+                        "name", "package", "source", "effect")
+                .handler(args -> {
+                    String name = require(args, "name");
+                    String pkg = require(args, "package");
+                    String source = require(args, "source");
+                    String effect = require(args, "effect");
+
+                    String problem = LuaRuntime.checkSyntax(source);
+                    if (problem != null) {
+                        throw new McpTool.ToolError("the script does not compile: " + problem);
+                    }
+
+                    SavedScript saved = ScriptStore.of(context).save(name, pkg, source, effect);
+                    JSONObject out = saved.describe();
+                    out.put("saved", true);
+                    out.put("note", "The user runs or deletes it from the automation tab."
+                            + " Saving under this name again replaces it.");
+                    return McpTool.json(out);
+                })
+                .build());
+
+        add(McpTool.of("script_list")
+                .title("List the user's saved scripts")
+                .description("The scripts the user has kept, newest first, with what each one is"
+                        + " for and what happened the last time it was run. Pass a name to get"
+                        + " that one script's source as well. Read-only, never prompts.")
+                .readOnly()
+                .input(props(
+                        "name", McpTool.string("Return this one script in full, including its"
+                                + " source")))
+                .handler(args -> {
+                    ScriptStore store = ScriptStore.of(context);
+                    String name = args.optString("name", "");
+                    JSONArray scripts = new JSONArray();
+                    if (!name.isEmpty()) {
+                        SavedScript script = store.byName(name);
+                        if (script == null) {
+                            throw new McpTool.ToolError("no saved script called '" + name + "'."
+                                    + " Call script_list without a name to see what is there.");
+                        }
+                        JSONObject one = script.describe();
+                        one.put("source", script.source);
+                        scripts.put(one);
+                    } else {
+                        for (SavedScript script : store.all()) {
+                            scripts.put(script.describe());
+                        }
+                    }
+                    JSONObject out = new JSONObject();
+                    out.put("scripts", scripts);
+                    out.put("count", scripts.length());
                     return McpTool.json(out);
                 })
                 .build());
@@ -1087,6 +1172,22 @@ public final class ToolRegistry {
     // =====================================================================
     // Helpers
     // =====================================================================
+
+    /**
+     * The call behind {@code lua_exec}, without the prompt.
+     *
+     * <p>Shared with the automation tab: tapping Run there is the user making the
+     * decision themselves, so prompting again would be asking twice.
+     */
+    public JSONObject runScript(String pkg, String source, long maxInstructions) throws Exception {
+        requireAppPeer(pkg);
+        JSONObject callArgs = new JSONObject();
+        callArgs.put("source", source);
+        callArgs.put("max_instructions", maxInstructions);
+        JSONObject out = capabilities.appCall(pkg, "lua_exec", callArgs, 30_000L);
+        out.put("package", pkg);
+        return out;
+    }
 
     /**
      * The confirmation prompt shows the script itself - it is the thing being

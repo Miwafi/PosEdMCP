@@ -1,6 +1,8 @@
 package dev.posedmcp.xposed;
 
 import android.content.Context;
+import android.database.Cursor;
+import android.database.sqlite.SQLiteDatabase;
 
 import org.json.JSONObject;
 import org.luaj.vm2.Globals;
@@ -71,6 +73,7 @@ public final class LuaRuntime {
     private static final int MAX_METHOD_LIST = 500;
     private static final int MAX_TABLE_ENTRIES = 100;
     private static final int MAX_ARRAY_ENTRIES = 100_000;
+    public static final int DB_ROW_LIMIT = 200;
 
     private LuaRuntime() {
     }
@@ -126,7 +129,8 @@ public final class LuaRuntime {
 
         Budget budget = new Budget(limit);
         Globals globals = globals(out, budget);
-        globals.set("app", host(packageName, appClassLoader, appContext, out));
+        List<SQLiteDatabase> databases = new ArrayList<>();
+        globals.set("app", host(packageName, appClassLoader, appContext, out, databases));
 
         long startedAt = System.currentTimeMillis();
         try {
@@ -143,6 +147,37 @@ public final class LuaRuntime {
             // than allowed to take the target process down silently.
             return result(false, null, t.getClass().getSimpleName() + ": " + t.getMessage(),
                     captured, budget, startedAt);
+        } finally {
+            // A database left open would hold a file descriptor in the target
+            // process for as long as that process lives.
+            for (SQLiteDatabase database : databases) {
+                try {
+                    database.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
+    /**
+     * Compiles a script without running any of it.
+     *
+     * <p>Used when one is filed away for later: a saved script that does not even
+     * parse is a trap for whoever taps Run, and compiling is cheap. Nothing the
+     * script contains is executed, so this is safe to call from the app process.
+     *
+     * @return the error text, or {@code null} when it compiles
+     */
+    public static String checkSyntax(String source) {
+        try {
+            Globals globals = globals(new PrintStream(new ByteArrayOutputStream(), true),
+                    new Budget(DEFAULT_MAX_INSTRUCTIONS));
+            globals.load(source, "script");
+            return null;
+        } catch (LuaError e) {
+            return e.getMessage();
+        } catch (Throwable t) {
+            return t.getClass().getSimpleName() + ": " + t.getMessage();
         }
     }
 
@@ -194,7 +229,7 @@ public final class LuaRuntime {
     }
 
     private static LuaTable host(String packageName, ClassLoader loader, Context context,
-            PrintStream out) {
+            PrintStream out, List<SQLiteDatabase> databases) {
         LuaTable host = new LuaTable();
         host.set("name", fn(a -> LuaValue.valueOf(packageName)));
         host.set("uid", fn(a -> LuaValue.valueOf(android.os.Process.myUid())));
@@ -239,6 +274,8 @@ public final class LuaRuntime {
             int max = a.narg() > 1 && a.arg(2).isint() ? a.arg(2).toint() : MAX_READ_CHARS;
             return LuaValue.valueOf(readText(a.checkjstring(1), max));
         }));
+
+        host.set("db", fn(a -> openDatabase(a.checkjstring(1), databases)));
 
         host.set("log", fn(a -> {
             String text = a.narg() > 0 ? a.arg(1).tojstring() : "";
@@ -556,8 +593,133 @@ public final class LuaRuntime {
         return sb.toString();
     }
 
-    private static LuaTable methods(Object target, String filter) {
-        if (target == null) {
+    // ---- databases ---------------------------------------------------------
+
+    /**
+     * Opens a SQLite database read-only.
+     *
+     * <p>Read-only is the point, not a limitation. This is for seeing what an
+     * application stores - the fastest way to understand an app whose classes are
+     * obfuscated. A handle that cannot write cannot corrupt a database the
+     * application still has open, and writing belongs through the application's
+     * own APIs anyway: they keep its caches, observers and notifications in step,
+     * which a raw UPDATE would not. Reading a database is the same privilege as
+     * reading its file, which app.read already offers.
+     */
+    private static LuaValue openDatabase(String path, List<SQLiteDatabase> opened) {
+        if (!new File(path).exists()) {
+            throw new LuaError("no database at " + path);
+        }
+        SQLiteDatabase database;
+        try {
+            database = SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READONLY);
+        } catch (Throwable t) {
+            throw new LuaError("could not open " + path + " read-only: " + messageOf(t));
+        }
+        opened.add(database);
+
+        LuaTable handle = new LuaTable();
+        handle.set("path", LuaValue.valueOf(path));
+        handle.set("tables", fn(a -> databaseTables(database)));
+        handle.set("schema", fn(a -> databaseSchema(database, a.checkjstring(1))));
+        handle.set("query", fn(a -> databaseQuery(database, a.checkjstring(1), rest(a, 1))));
+        handle.set("one", fn(a -> {
+            LuaTable rows = databaseQuery(database, a.checkjstring(1), rest(a, 1));
+            return rows.length() > 0 ? rows.get(1) : LuaValue.NIL;
+        }));
+        return handle;
+    }
+
+    private static LuaValue databaseTables(SQLiteDatabase database) {
+        LuaTable out = new LuaTable();
+        try (Cursor cursor = database.rawQuery("select name from sqlite_master where type = 'table'"
+                + " and name not like 'sqlite_%' order by name", null)) {
+            int i = 1;
+            while (cursor.moveToNext()) {
+                out.set(i++, LuaValue.valueOf(cursor.getString(0)));
+            }
+        }
+        return out;
+    }
+
+    private static LuaValue databaseSchema(SQLiteDatabase database, String table) {
+        LuaTable out = new LuaTable();
+        try (Cursor cursor = database.rawQuery("pragma table_info(" + quote(table) + ")", null)) {
+            if (!cursor.moveToFirst()) {
+                throw new LuaError("no table " + table + " here - db.tables() lists them");
+            }
+            int name = cursor.getColumnIndex("name");
+            int type = cursor.getColumnIndex("type");
+            int notNull = cursor.getColumnIndex("notnull");
+            int primaryKey = cursor.getColumnIndex("pk");
+            int i = 1;
+            do {
+                StringBuilder line = new StringBuilder(cursor.getString(name));
+                String declared = cursor.getString(type);
+                if (declared != null && !declared.isEmpty()) {
+                    line.append(' ').append(declared);
+                }
+                if (cursor.getInt(notNull) != 0) {
+                    line.append(" NOT NULL");
+                }
+                if (cursor.getInt(primaryKey) != 0) {
+                    line.append(" PRIMARY KEY");
+                }
+                out.set(i++, LuaValue.valueOf(line.toString()));
+            } while (cursor.moveToNext());
+        }
+        return out;
+    }
+
+    private static LuaTable databaseQuery(SQLiteDatabase database, String sql, LuaValue[] args) {
+        String[] bound = new String[args.length];
+        for (int i = 0; i < args.length; i++) {
+            bound[i] = args[i].isnil() ? null : args[i].tojstring();
+        }
+        LuaTable rows = new LuaTable();
+        try (Cursor cursor = database.rawQuery(sql, bound)) {
+            String[] columns = cursor.getColumnNames();
+            int written = 0;
+            while (cursor.moveToNext()) {
+                if (written == DB_ROW_LIMIT) {
+                    // Say the list is a prefix rather than quietly returning one.
+                    rows.set("truncated", LuaValue.TRUE);
+                    break;
+                }
+                LuaTable row = new LuaTable();
+                for (int c = 0; c < columns.length; c++) {
+                    row.set(columns[c], columnValue(cursor, c));
+                }
+                rows.set(++written, row);
+            }
+        }
+        return rows;
+    }
+
+    private static LuaValue columnValue(Cursor cursor, int index) {
+        switch (cursor.getType(index)) {
+            case Cursor.FIELD_TYPE_INTEGER:
+                return LuaValue.valueOf(cursor.getLong(index));
+            case Cursor.FIELD_TYPE_FLOAT:
+                return LuaValue.valueOf(cursor.getDouble(index));
+            case Cursor.FIELD_TYPE_STRING:
+                return LuaValue.valueOf(cursor.getString(index));
+            case Cursor.FIELD_TYPE_BLOB:
+                byte[] blob = cursor.getBlob(index);
+                // Not something to hand a script as a table of numbers; the size
+                // is the useful part and the script can decide what to do next.
+                return LuaValue.valueOf("<blob " + (blob == null ? 0 : blob.length) + " bytes>");
+            default:
+                return LuaValue.NIL;
+        }
+    }
+
+    /** A bare name would end the pragma's argument list early. */
+    private static String quote(String name) {
+        return "\"" + name.replace("\"", "\"\"") + "\"";
+    }
+
+    private static LuaTable methods(Object target, String filter) {        if (target == null) {
             throw new LuaError("app.methods needs a class or an instance; got nil");
         }
         Class<?> owner = target instanceof Class ? (Class<?>) target : target.getClass();

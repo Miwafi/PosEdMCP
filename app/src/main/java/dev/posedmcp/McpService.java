@@ -13,12 +13,15 @@ import android.os.Build;
 import android.os.IBinder;
 import android.os.SystemClock;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import dev.posedmcp.a11y.AccessibilityBridge;
 import dev.posedmcp.ipc.BridgeCredentials;
 import dev.posedmcp.ipc.BridgeServer;
 import dev.posedmcp.mcp.McpServer;
+import dev.posedmcp.mcp.McpTool;
 import dev.posedmcp.mcp.ToolRegistry;
 import dev.posedmcp.root.ConfirmationGate;
 import dev.posedmcp.state.DeviceStatus;
@@ -52,6 +55,7 @@ public final class McpService extends Service {
     private EventStore events;
     private BridgeServer bridge;
     private McpServer mcp;
+    private ToolRegistry tools;
 
     public static McpService instance() {
         return instance;
@@ -125,7 +129,7 @@ public final class McpService extends Service {
             bridge.start();
 
             Capabilities capabilities = new Capabilities(this, bridge);
-            ToolRegistry tools = new ToolRegistry(this, prefs, capabilities, bridge, events);
+            tools = new ToolRegistry(this, prefs, capabilities, bridge, events);
             mcp = new McpServer(this, prefs, tools, events);
             mcp.start();
 
@@ -157,6 +161,7 @@ public final class McpService extends Service {
         }
         mcp = null;
         bridge = null;
+        tools = null;
         AccessibilityBridge.setEventSink(null);
         Logx.i("service stopped");
     }
@@ -245,6 +250,28 @@ public final class McpService extends Service {
 
     public boolean systemBridgeConnected() {
         return bridge != null && bridge.systemPeer() != null;
+    }
+
+    /**
+     * Runs a saved script, because the user tapped Run on it in the automation
+     * tab.     *
+     * <p>That tap is the user making the decision themselves, so this goes
+     * straight to the bridge instead of through the confirmation gate that the
+     * agent's own calls use - asking again would be asking them twice.
+     */
+    public org.json.JSONObject runScript(String pkg, String source, long maxInstructions)
+            throws Exception {
+        ToolRegistry registry = tools;
+        if (registry == null) {
+            throw new IllegalStateException("the service is not running");
+        }
+        return registry.runScript(pkg, source, maxInstructions);
+    }
+
+    /** The registered tools, so the status tab lists what actually exists. */
+    public List<McpTool> tools() {
+        ToolRegistry registry = tools;
+        return registry == null ? Collections.emptyList() : registry.all();
     }
 
     // ---- notification -----------------------------------------------------

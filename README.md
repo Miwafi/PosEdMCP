@@ -124,15 +124,26 @@ POSEDMCP_TOKEN=<token> ./tools/mcp-call.sh '{"jsonrpc":"2.0","id":1,"method":"to
 
 只读：`device_info`、`module_status`、`list_packages`、`foreground_app`、`events_poll`、
 `plugin_list`、`apk_info`、`apk_list`、`dex_classes`、`dex_search`、`smali_disassemble`、
-`smali_assemble`、`hook_records`。
+`smali_assemble`、`hook_records`、`script_list`。
 
 需要确认：`root_shell_exec`、`screen_capture`、`ui_dump`、`input_inject`、`plugin_load`、
 `plugin_invoke`、`lua_exec`、`hook_method`、`hook_clear`、`invoke_method`。
 
-不确认但会改状态的只有一个：`launch_app`——把某个应用切到前台，等同于点它的图标。
-放在这里说是因为它不弹窗，而它确实会改变你屏幕上的东西。
+不确认但会改状态的：`launch_app`——把某个应用切到前台，等同于点它的图标。以及
+`script_save`——把一个脚本存进「自动化」页，只写本应用自己的存储，不改设备上任何东西。
+放在这里说是因为它们都不弹窗，而它们确实会改变你会看到的东西。
+`smali_assemble` 写文件同样不弹窗——真正的边界是**执行**，而那一步在 `plugin_load` 和
+`lua_exec` 上；自动化页里点 Run 就是执行。
 
-`smali_assemble` 写文件不弹窗——真正的边界是**执行**，而那一步在 `plugin_load` 上。
+### 自动化页
+
+应用界面分两个 Tab：**Status**（服务状态、端点、确认策略、工具清单）和 **Scripts**。
+Scripts 页列出模型替你存下的脚本，每条显示名称、作用、目标应用，以及**上一次运行的结果**；
+可以打开看源码、运行、删除。
+
+在那一页点 Run **不再弹确认框**——那一下点击就是你本人的决定，再问一次等于问两遍。
+所以能给模型这条能力的前提是：脚本得由你先看过、而且是你自己去点。模型自己跑的路径
+（`lua_exec`）仍然每次都弹窗。
 
 ## 反编译与运行时观察
 
@@ -186,9 +197,13 @@ GitHub 应用的探针正是这样得出「这个应用没登录」的结论，�
 - **不会挂死应用。** 脚本跑过指令预算即被中断，且这个护栏脚本自己关不掉。
 - **`app.files` 读不到目录时抛错，而不是返回空表。** 空表只意味着一件事：目录确实是空的。
   这一条是专门针对上面那类静默失败定的。
+- **`app.db` 只读。** 这是给「看不懂的应用看它存了什么」用的——混淆过的类名帮不上忙，数据库
+  结构能。只读不是限制而是重点：一个不能写的句柄破坏不了应用还开着的库；要写就该走应用
+  自己的 API（ContentResolver 之类），它才会顺带更新缓存、观察者和通知，裸 UPDATE 不会。
+  读数据库和读它的文件是同一级别的权限，而 `app.read` 早就有。
 
 脚本拿到全局表 `app`：`name()`、`uid()`、`context()`、`class()`、`new()`、`call()`、
-`get()`、`set()`、`methods()`、`files()`、`exists()`、`read()`、`log()`。`app.call` 走
+`get()`、`set()`、`methods()`、`files()`、`exists()`、`read()`、`db()`、`log()`。`app.call` 走
 `getDeclaredMethod` + `setAccessible`，沿继承链找方法，重载按**实参类型契合度**打分选择
 （`ContentValues` 有九个两参 `put`，`put("title","Dentist")` 仍能选中 `put(String,String)`）；
 真的打平时**拒绝并列出候选**而不是猜，此时可以按 `app.methods` 打印的写法指定：
@@ -203,7 +218,7 @@ smali 那条路保留：`invoke_method` 和 Lua 都表达不了的**结构性**�
 │  McpService (前台服务)                                  │
 │    ├── HttpTransport  127.0.0.1:8765  /mcp              │
 │    ├── McpServer      JSON-RPC, 工具分发                │
-│    ├── ToolRegistry   24 个工具 + 确认策略               │
+│    ├── ToolRegistry   26 个工具 + 确认策略               │
 │    ├── ConfirmationGate ──> ConfirmOverlay (应用浮层)   │
 │    ├── BridgeServer   127.0.0.1:8766  (进程间桥)         │
 │    ├── RootShell      su, 管道 stdio（非 pty）           │
@@ -272,6 +287,10 @@ ContentProvider——能通就用，省掉一次弹窗。
   会先问 system_server 上一次的失败原因，跳过这条死路，直接走 root（一次确认）。
   其余 system 能力（前台追踪、事件、输入注入）均正常。
 - 没有单元测试。所有验证都是在真机上按行为做的。
+- **自动化页的运行要求目标进程还活着。** ColorOS 会在应用切到后台后很快冻结它，被冻结的
+  进程不应答桥请求，于是运行会以 30 秒超时报错。卡片会如实写出这个结果，但要真跑通，
+  得先把目标应用打开着再回来点 Run——或者在页面上先 `launch_app` 把它叫起来。
+  这是平台的冻结行为，不是脚本或桥的问题。
 - **`lua_exec` 的指令预算只约束 Lua 本身。** 脚本如果把时间花在慢的 Java 调用上（网络、
   文件），预算不会触发，只能靠桥的请求超时兜底——而超时后脚本所在线程仍会把当前调用跑完，
   这一点和 `plugin_invoke` 一样。
@@ -314,6 +333,12 @@ Zygisk-LSPosed 1.10.2 (7182) 上验证：
   `shared_prefs` 下的 10 个文件，并读到它自己 `AccountManager` 里的 `yunqinglt /
   com.github.android` —— 同一个检查用手写 smali 探针跑时返回了空串，并在阳性对照下暴露
   出那是探针 bug 而不是设备状态
+- **`app.db`**：只读打开 `com.github.android` 正在使用的 WAL 库，列出 15 张表、读回
+  `recent_searches` 的真实行（`sunflower233`、`mlinux-project`、`micode`）；库不存在和表
+  不存在都给出具体错误
+- **自动化页**：`script_save` 存下的脚本出现在 Scripts 页，显示名称、目标应用、作用与
+  上次运行结果；点 Run 会真的经桥执行并把结果写回卡片（实测中目标进程在后台被冻结，
+  卡片如实显示 `FAILED … timed out`）
 
 ### 尚未验证
 
