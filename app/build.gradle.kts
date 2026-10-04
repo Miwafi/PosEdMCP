@@ -54,9 +54,16 @@ android {
 }
 
 dependencies {
-    compileOnly("androidx.annotation:annotation:1.9.1")
     // Provided by LSPosed at runtime; never packaged into the APK.
     compileOnly("de.robv.android.xposed:api:82")
+
+    // Material 3 for the app's own screen. AppCompat comes with it: a Material3
+    // theme is an AppCompat theme, so the activity has to be an
+    // AppCompatActivity for the widgets to pick up their styling. Both bring
+    // androidx.annotation in transitively, which is why it is no longer declared
+    // on its own - pinning it here fought the version the runtime resolves.
+    implementation("androidx.appcompat:appcompat:1.7.1")
+    implementation("com.google.android.material:material:1.13.0")
 
     // On-device smali disassembly and assembly. Pure Java, so it runs on ART -
     // apktool would not, its resource decoding shells out to a host-native aapt2.

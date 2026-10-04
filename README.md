@@ -145,6 +145,15 @@ Scripts 页列出模型替你存下的脚本，每条显示名称、作用、目
 所以能给模型这条能力的前提是：脚本得由你先看过、而且是你自己去点。模型自己跑的路径
 （`lua_exec`）仍然每次都弹窗。
 
+界面是 **Material 3**（`Theme.Material3.DayNight.NoActionBar` + Material Components）：
+工具栏、TabLayout、脚本卡片、按破坏性分级的按钮（填充／色调／描边）、开关。颜色全部取自
+主题，所以在 Android 12+ 上跟随壁纸取色，别处用 Material 默认色——代码里没有一处写死颜色。
+
+> Material3 主题本身继承 AppCompat 主题，所以 `MainActivity` 是 `AppCompatActivity`，
+> AppCompat 和 Material 也就进了模块的 dex：**APK 从 14 MB 涨到 26 MB**（debug、未混淆）。
+> 类是按需加载的，但模块 APK 会被注入每一个作用域进程，这个足迹值得知道。
+> 真要在意，可以给 release 打开 R8——目前两种构建都没开。
+
 ## 反编译与运行时观察
 
 给在设备上做逆向的 Agent 用。产出 smali 汇编和应用元信息，不做 Java 源码；改动通过

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!--
+      Material 3. DayNight so the screen follows the system rather than pinning a
+      palette, and NoActionBar because the screen draws its own toolbar - the app
+      only has one, and an ActionBar would sit above a title we already show.
+
+      DynamicColors applies the wallpaper palette on top of this at runtime on
+      Android 12+, so most of the time none of the roles below are what you see.
+      They are the fallback for a device or a user that does not want that.
+    -->
+    <style name="Theme.PosEdMCP" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- Edge to edge: the toolbar's own surface runs under the status bar and
+             the content is inset by fitsSystemWindows on the root layout. -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">?attr/isLightTheme</item>
+        <item name="android:windowLightNavigationBar">?attr/isLightTheme</item>
+    </style>
+
+</resources>

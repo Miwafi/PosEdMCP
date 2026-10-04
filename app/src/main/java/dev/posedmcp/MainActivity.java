@@ -1,7 +1,5 @@
 package dev.posedmcp;
 
-import android.app.Activity;
-import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -15,13 +13,22 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import androidx.appcompat.app.AppCompatActivity;
+
+import com.google.android.material.appbar.MaterialToolbar;
+import com.google.android.material.button.MaterialButton;
+import com.google.android.material.card.MaterialCardView;
+import com.google.android.material.color.DynamicColors;
+import com.google.android.material.color.MaterialColors;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import com.google.android.material.materialswitch.MaterialSwitch;
+import com.google.android.material.tabs.TabLayout;
 
 import org.json.JSONObject;
 
@@ -41,25 +48,29 @@ import dev.posedmcp.xposed.LuaRuntime;
 /**
  * Status, controls and the automation library.
  *
- * <p>Deliberately plain: this app exists to run a service, and the screen it
- * needs is a way to see whether that service is healthy, hand the user the
- * endpoint details, and run or remove the scripts the agent filed for them.
+ * <p>Material 3 throughout: the screen is the only surface this app draws, and a
+ * plain grey list next to an agent's worth of capability looked like a debug
+ * build. Colour comes from the theme, which means the wallpaper palette on
+ * Android 12+ and the Material defaults everywhere else - nothing here names a
+ * colour of its own.
  */
-public class MainActivity extends Activity {
+public class MainActivity extends AppCompatActivity {
 
     private static final int REQUEST_NOTIFICATIONS = 100;
 
     private Prefs prefs;
+    private View root;
     private LinearLayout statusContent;
     private LinearLayout scriptsContent;
     private ScrollView statusScroll;
     private ScrollView scriptsScroll;
     private FrameLayout tabContent;
-    private Button statusTab;
-    private Button scriptsTab;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // Before super.onCreate, so the wallpaper palette is in place before any
+        // view resolves a colour against the theme.
+        DynamicColors.applyToActivityIfAvailable(this);
         super.onCreate(savedInstanceState);
         prefs = Prefs.of(this);
         prefs.ensureTokens();
@@ -70,35 +81,44 @@ public class MainActivity extends Activity {
         statusScroll = scrolled(statusContent);
         scriptsScroll = scrolled(scriptsContent);
 
-        // A tab strip built by hand rather than with TabHost, which cost two
-        // platform quirks in a row: setIndicator(CharSequence) inflates a
-        // framework layout that no longer resolves on Android 16 and takes the
-        // activity down with it, and tapping a custom indicator did not switch
-        // tabs. Neither is worth carrying a framework widget for two fixed tabs.
-        statusTab = tabLabel("Status");
-        scriptsTab = tabLabel("Scripts");
-        statusTab.setOnClickListener(v -> selectTab(0));
-        scriptsTab.setOnClickListener(v -> selectTab(1));
+        MaterialToolbar toolbar = new MaterialToolbar(this);
+        toolbar.setTitle(R.string.app_name);
 
-        LinearLayout strip = new LinearLayout(this);
-        strip.setOrientation(LinearLayout.HORIZONTAL);
-        strip.addView(statusTab, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        strip.addView(scriptsTab, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TabLayout tabs = new TabLayout(this);
+        tabs.setTabMode(TabLayout.MODE_FIXED);
+        tabs.setTabGravity(TabLayout.GRAVITY_FILL);
+        tabs.addTab(tabs.newTab().setText("Status"));
+        tabs.addTab(tabs.newTab().setText("Scripts"));
+        tabs.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
+            @Override
+            public void onTabSelected(TabLayout.Tab tab) {
+                selectTab(tab.getPosition());
+            }
+
+            @Override
+            public void onTabUnselected(TabLayout.Tab tab) {
+            }
+
+            @Override
+            public void onTabReselected(TabLayout.Tab tab) {
+            }
+        });
 
         tabContent = new FrameLayout(this);
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        // Apps targeting Android 15+ draw edge to edge, so without this the tab
-        // strip sits under the status bar and taps at the top of the screen go to
-        // the system instead of to the tabs.
-        root.setFitsSystemWindows(true);
-        root.addView(strip, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        // Apps targeting Android 15+ draw edge to edge; without this the toolbar
+        // sits under the status bar and taps at the top of the screen go to the
+        // system instead of to the app.
+        layout.setFitsSystemWindows(true);
+        layout.addView(toolbar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
-        root.addView(tabContent, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+        layout.addView(tabs, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        layout.addView(tabContent, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 0, 1f));
-        setContentView(root);
+        root = layout;
+        setContentView(layout);
         selectTab(0);
 
         ensureNotificationPermission();
@@ -108,13 +128,6 @@ public class MainActivity extends Activity {
         McpService.start(this);
     }
 
-    private void selectTab(int index) {
-        tabContent.removeAllViews();
-        tabContent.addView(index == 0 ? statusScroll : scriptsScroll);
-        statusTab.setBackgroundColor(index == 0 ? 0x22000000 : 0x00000000);
-        scriptsTab.setBackgroundColor(index == 1 ? 0x22000000 : 0x00000000);
-    }
-
     @Override
     protected void onResume() {
         super.onResume();
@@ -122,14 +135,15 @@ public class MainActivity extends Activity {
         renderScripts();
     }
 
+    private void selectTab(int index) {
+        tabContent.removeAllViews();
+        tabContent.addView(index == 0 ? statusScroll : scriptsScroll);
+    }
+
     // ---- status tab --------------------------------------------------------
 
     private void renderStatus() {
         statusContent.removeAllViews();
-
-        TextView title = text("PosEdMCP", 24, true);
-        statusContent.addView(title);
-        statusContent.addView(muted("Root-backed MCP server for on-device agents."));
 
         McpService service = McpService.instance();
         boolean running = service != null && service.isRunning();
@@ -152,7 +166,7 @@ public class MainActivity extends Activity {
         statusContent.addView(keyValue("Accessibility",
                 AccessibilityBridge.isConnected() ? "enabled" : "NOT enabled"));
         if (!AccessibilityBridge.isConnected()) {
-            statusContent.addView(muted("Accessibility is what keeps this app running: an"
+            statusContent.addView(body("Accessibility is what keeps this app running: an"
                     + " application hosting an enabled accessibility service holds a system"
                     + " binding, so it is not frozen once it leaves the screen. Without it the MCP"
                     + " endpoint goes silent exactly when an agent in another app tries to use it."
@@ -160,23 +174,23 @@ public class MainActivity extends Activity {
                     + " without root."));
         }
         if (!isBatteryExempt()) {
-            statusContent.addView(muted("Battery optimisation also freezes the process in the"
+            statusContent.addView(body("Battery optimisation also freezes the process in the"
                     + " background. Grant unrestricted battery use, and on ColorOS also allow"
                     + " background activity for PosEdMCP in the battery settings."));
         }
-        statusContent.addView(muted("Without the overlay permission, approval prompts fall back"
-                + " to a notification. If that also fails, privileged calls are refused."));
+        statusContent.addView(body("Without the overlay permission, approval prompts fall back to"
+                + " a notification. If that also fails, privileged calls are refused."));
 
         statusContent.addView(section("ENDPOINT"));
         final String url = "http://127.0.0.1:" + prefs.mcpPort() + "/mcp";
-        statusContent.addView(mono(url));
-        statusContent.addView(muted("Bearer token"));
-        statusContent.addView(mono(prefs.mcpToken()));
+        statusContent.addView(monoBlock(url));
+        statusContent.addView(caption("Bearer token"));
+        statusContent.addView(monoBlock(prefs.mcpToken()));
 
         LinearLayout tokenRow = row();
-        tokenRow.addView(button("Copy URL", v -> copy("PosEdMCP URL", url)));
-        tokenRow.addView(button("Copy token", v -> copy("PosEdMCP token", prefs.mcpToken())));
-        tokenRow.addView(button("Rotate", v -> {
+        tokenRow.addView(tonalButton("Copy URL", v -> copy("PosEdMCP URL", url)));
+        tokenRow.addView(tonalButton("Copy token", v -> copy("PosEdMCP token", prefs.mcpToken())));
+        tokenRow.addView(outlinedButton("Rotate", v -> {
             prefs.rotateTokens();
             if (McpService.instance() != null) {
                 McpService.stop(this);
@@ -187,12 +201,12 @@ public class MainActivity extends Activity {
         }));
         statusContent.addView(tokenRow);
 
-        statusContent.addView(muted("The listener binds to 127.0.0.1 only. To reach it from a PC"
+        statusContent.addView(body("The listener binds to 127.0.0.1 only. To reach it from a PC"
                 + " over USB: adb forward tcp:" + prefs.mcpPort() + " tcp:" + prefs.mcpPort()));
 
         statusContent.addView(section("ACTIONS"));
         LinearLayout serviceRow = row();
-        serviceRow.addView(button(running ? "Stop service" : "Start service", v -> {
+        serviceRow.addView(filledButton(running ? "Stop service" : "Start service", v -> {
             if (McpService.instance() != null && McpService.instance().isRunning()) {
                 McpService.stop(this);
             } else {
@@ -200,7 +214,7 @@ public class MainActivity extends Activity {
             }
             statusContent.postDelayed(this::renderStatus, 600L);
         }));
-        serviceRow.addView(button("Overlay settings", v -> {
+        serviceRow.addView(tonalButton("Overlay", v -> {
             try {
                 startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                         Uri.parse("package:" + getPackageName())));
@@ -208,8 +222,8 @@ public class MainActivity extends Activity {
                 toast("Could not open overlay settings");
             }
         }));
-        serviceRow.addView(button("Battery settings", v -> openBatterySettings()));
-        serviceRow.addView(button("Accessibility", v -> {
+        serviceRow.addView(tonalButton("Battery", v -> openBatterySettings()));
+        serviceRow.addView(tonalButton("Accessibility", v -> {
             try {
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
                 toast("Turn on PosEdMCP in the list");
@@ -220,7 +234,7 @@ public class MainActivity extends Activity {
         statusContent.addView(serviceRow);
 
         statusContent.addView(section("CONFIRMATION POLICY"));
-        statusContent.addView(muted("Root shell commands always prompt and cannot be turned off."
+        statusContent.addView(body("Root shell commands always prompt and cannot be turned off."
                 + " The others can be relaxed, because they use the module's platform access"
                 + " rather than a shell."));
         statusContent.addView(toggle("Confirm screen capture and UI dumps", prefs.confirmScreen(),
@@ -233,9 +247,9 @@ public class MainActivity extends Activity {
                 checked -> prefs.setAutostart(checked)));
 
         statusContent.addView(section("TOOLS"));
-        statusContent.addView(muted("Read-only tools never prompt. Everything else asks the user"
+        statusContent.addView(body("Read-only tools never prompt. Everything else asks the user"
                 + " before it runs."));
-        statusContent.addView(mono(toolSummary()));
+        statusContent.addView(monoBlock(toolSummary()));
     }
 
     /** Read off the registry rather than kept as a second list that goes stale. */
@@ -258,50 +272,55 @@ public class MainActivity extends Activity {
 
     private void renderScripts() {
         scriptsContent.removeAllViews();
-        scriptsContent.addView(text("Saved scripts", 24, true));
-        scriptsContent.addView(muted("Scripts the agent filed for you. Running one from here is"
+        scriptsContent.addView(headline("Saved scripts"));
+        scriptsContent.addView(body("Scripts the agent filed for you. Running one from here is"
                 + " your own tap, so it runs without an approval prompt. The result of the last"
                 + " run is kept under each script."));
 
         List<SavedScript> scripts = ScriptStore.of(this).all();
         if (scripts.isEmpty()) {
             scriptsContent.addView(section("NOTHING SAVED YET"));
-            scriptsContent.addView(muted("Ask the agent to save a script and it appears here,"
+            scriptsContent.addView(body("Ask the agent to save a script and it appears here,"
                     + " with a line saying what it does."));
             return;
         }
 
-        scriptsContent.addView(section(scripts.size() + (scripts.size() == 1 ? " SCRIPT" : " SCRIPTS")));
+        scriptsContent.addView(section(scripts.size() + (scripts.size() == 1
+                ? " SCRIPT" : " SCRIPTS")));
         for (SavedScript script : scripts) {
             scriptsContent.addView(scriptCard(script));
         }
     }
 
     private View scriptCard(SavedScript script) {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(12);
-        card.setPadding(pad, pad, pad, pad);
-        card.setBackgroundColor(0x14000000);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+        MaterialCardView card = new MaterialCardView(this);
+        card.setCardElevation(dp(1));
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(12);
-        card.setLayoutParams(lp);
+        cardParams.topMargin = dp(12);
+        card.setLayoutParams(cardParams);
 
-        card.addView(text(script.name, 16, true));
-        card.addView(muted("in " + script.packageName));
+        LinearLayout inner = new LinearLayout(this);
+        inner.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(16);
+        inner.setPadding(pad, pad, pad, dp(8));
+
+        inner.addView(title(script.name));
+        inner.addView(caption("in " + script.packageName));
         if (script.effect != null && !script.effect.isEmpty()) {
-            card.addView(muted(script.effect));
+            inner.addView(body(script.effect));
         }
-        TextView last = muted(lastRunLine(script));
+        TextView last = caption(lastRunLine(script));
         last.setTypeface(Typeface.MONOSPACE);
-        card.addView(last);
+        inner.addView(last);
 
         LinearLayout actions = row();
-        actions.addView(button("Run", v -> runScript(script)));
-        actions.addView(button("Open", v -> showSource(script)));
-        actions.addView(button("Delete", v -> confirmDelete(script)));
-        card.addView(actions);
+        actions.addView(filledButton("Run", v -> runScript(script)));
+        actions.addView(tonalButton("Open", v -> showSource(script)));
+        actions.addView(outlinedButton("Delete", v -> confirmDelete(script)));
+        inner.addView(actions);
+
+        card.addView(inner);
         return card;
     }
 
@@ -359,15 +378,16 @@ public class MainActivity extends Activity {
     }
 
     private void showSource(SavedScript script) {
-        TextView body = text(script.source, 12, false);
+        TextView body = text(script.source);
         body.setTypeface(Typeface.MONOSPACE);
+        body.setTextSize(12);
         body.setTextIsSelectable(true);
-        int pad = dp(16);
+        int pad = dp(20);
         body.setPadding(pad, pad, pad, pad);
         ScrollView scroll = new ScrollView(this);
         scroll.addView(body);
 
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(script.name)
                 .setView(scroll)
                 .setPositiveButton("Close", null)
@@ -376,7 +396,7 @@ public class MainActivity extends Activity {
     }
 
     private void confirmDelete(SavedScript script) {
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Delete " + script.name + "?")
                 .setMessage("It is removed from the library. This cannot be undone.")
                 .setPositiveButton("Delete", (dialog, which) -> {
@@ -387,44 +407,112 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    // ---- small view helpers ------------------------------------------------
+    // ---- type scale --------------------------------------------------------
 
-    private static String pad(String value, int width) {
-        StringBuilder sb = new StringBuilder(value);
-        while (sb.length() < width) {
-            sb.append(' ');
-        }
-        return sb.toString();
+    private TextView headline(String value) {
+        TextView tv = new TextView(this);
+        tv.setText(value);
+        tv.setTextAppearance(com.google.android.material.R.style
+                .TextAppearance_Material3_HeadlineSmall);
+        return tv;
     }
 
-    private static String trim(String value, int limit) {
-        if (value == null) {
-            return "";
-        }
-        String flat = value.trim();
-        return flat.length() <= limit ? flat : flat.substring(0, limit) + "…";
+    private TextView title(String value) {
+        TextView tv = new TextView(this);
+        tv.setText(value);
+        tv.setTextAppearance(com.google.android.material.R.style
+                .TextAppearance_Material3_TitleMedium);
+        return tv;
     }
 
-    /**
-     * A tab label.
-     *
-     * <p>A Button rather than a TextView: a plain TextView with a click listener
-     * ignored a very short synthetic tap on this ROM, and a tab that sometimes
-     * does nothing is worse than a slightly less tidy one.
-     */
-    private Button tabLabel(String label) {
-        Button tab = new Button(this);
-        tab.setText(label);
-        tab.setAllCaps(false);
-        tab.setTextSize(15);
-        tab.setTypeface(Typeface.DEFAULT_BOLD);
-        return tab;
+    private TextView body(String value) {
+        TextView tv = new TextView(this);
+        tv.setText(value);
+        tv.setTextAppearance(com.google.android.material.R.style
+                .TextAppearance_Material3_BodyMedium);
+        tv.setTextColor(color(com.google.android.material.R.attr.colorOnSurfaceVariant));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(6);
+        tv.setLayoutParams(lp);
+        return tv;
     }
 
-    private LinearLayout column() {        LinearLayout column = new LinearLayout(this);
+    /** A monospace block: endpoints, tokens, source, the tool table. */
+    private TextView monoBlock(String value) {
+        TextView tv = new TextView(this);
+        tv.setText(value);
+        tv.setTextAppearance(com.google.android.material.R.style
+                .TextAppearance_Material3_BodySmall);
+        tv.setTypeface(Typeface.MONOSPACE);
+        tv.setTextIsSelectable(true);
+        tv.setTextColor(color(com.google.android.material.R.attr.colorOnSurfaceVariant));
+        tv.setBackgroundColor(color(com.google.android.material.R.attr.colorSurfaceContainerHighest));
+        int p = dp(12);
+        tv.setPadding(p, p, p, p);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(6);
+        tv.setLayoutParams(lp);
+        return tv;
+    }
+
+    private TextView caption(String value) {
+        TextView tv = new TextView(this);
+        tv.setText(value);
+        tv.setTextAppearance(com.google.android.material.R.style
+                .TextAppearance_Material3_BodySmall);
+        tv.setTextColor(color(com.google.android.material.R.attr.colorOnSurfaceVariant));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(6);
+        tv.setLayoutParams(lp);
+        return tv;
+    }
+
+    private TextView section(String value) {
+        TextView tv = new TextView(this);
+        tv.setText(value);
+        tv.setTextAppearance(com.google.android.material.R.style
+                .TextAppearance_Material3_TitleSmall);
+        // colorPrimary is declared by AppCompat; the Material-specific roles
+        // (onSurfaceVariant, surfaceContainerHighest) live in Material's R.
+        tv.setTextColor(color(androidx.appcompat.R.attr.colorPrimary));
+        tv.setLetterSpacing(0.08f);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(28);
+        lp.bottomMargin = dp(4);
+        tv.setLayoutParams(lp);
+        return tv;
+    }
+
+    private TextView keyValue(String key, String value) {
+        TextView tv = new TextView(this);
+        tv.setText(key + ":  " + value);
+        tv.setTextAppearance(com.google.android.material.R.style
+                .TextAppearance_Material3_BodyLarge);
+        tv.setPadding(0, dp(3), 0, 0);
+        return tv;
+    }
+
+    private TextView text(String value) {
+        TextView tv = new TextView(this);
+        tv.setText(value);
+        return tv;
+    }
+
+    // ---- layout helpers ----------------------------------------------------
+
+    private int color(int attribute) {
+        return MaterialColors.getColor(root == null ? getWindow().getDecorView() : root, attribute);
+    }
+
+    private LinearLayout column() {
+        LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
         int pad = dp(20);
-        column.setPadding(pad, pad, pad, pad);
+        column.setPadding(pad, pad, pad, dp(32));
         return column;
     }
 
@@ -434,70 +522,35 @@ public class MainActivity extends Activity {
         return scroll;
     }
 
-    private TextView text(String value, float size, boolean bold) {
-        TextView tv = new TextView(this);
-        tv.setText(value);
-        tv.setTextSize(size);
-        if (bold) {
-            tv.setTypeface(Typeface.DEFAULT_BOLD);
-        }
-        return tv;
-    }
-
-    private TextView muted(String value) {
-        TextView tv = text(value, 13, false);
-        tv.setAlpha(0.7f);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(6);
-        tv.setLayoutParams(lp);
-        return tv;
-    }
-
-    private TextView mono(String value) {
-        TextView tv = text(value, 13, false);
-        tv.setTypeface(Typeface.MONOSPACE);
-        tv.setTextIsSelectable(true);
-        tv.setBackgroundColor(0x22000000);
-        int p = dp(10);
-        tv.setPadding(p, p, p, p);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(6);
-        tv.setLayoutParams(lp);
-        return tv;
-    }
-
-    private TextView section(String value) {
-        TextView tv = text(value, 12, true);
-        tv.setLetterSpacing(0.1f);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(26);
-        lp.bottomMargin = dp(4);
-        tv.setLayoutParams(lp);
-        return tv;
-    }
-
-    private TextView keyValue(String key, String value) {
-        TextView tv = text(key + ":  " + value, 14, false);
-        tv.setPadding(0, dp(3), 0, 0);
-        return tv;
-    }
-
     private LinearLayout row() {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.START);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(10);
+        lp.topMargin = dp(12);
         row.setLayoutParams(lp);
         return row;
     }
 
-    private Button button(String label, View.OnClickListener listener) {
-        Button button = new Button(this);
+    private MaterialButton filledButton(String label, View.OnClickListener listener) {
+        // The theme's button style is the filled one in Material 3; naming it
+        // keeps "primary action" explicit rather than a constructor default.
+        return button(label, listener, com.google.android.material.R.attr.materialButtonStyle);
+    }
+
+    private MaterialButton tonalButton(String label, View.OnClickListener listener) {
+        return button(label, listener,
+                com.google.android.material.R.attr.materialButtonTonalStyle);
+    }
+
+    private MaterialButton outlinedButton(String label, View.OnClickListener listener) {
+        return button(label, listener,
+                com.google.android.material.R.attr.materialButtonOutlinedStyle);
+    }
+
+    private MaterialButton button(String label, View.OnClickListener listener, int style) {
+        MaterialButton button = new MaterialButton(this, null, style);
         button.setText(label);
         button.setAllCaps(false);
         button.setOnClickListener(listener);
@@ -513,11 +566,13 @@ public class MainActivity extends Activity {
     }
 
     private View toggle(String label, boolean initial, OnChecked listener) {
-        Switch toggle = new Switch(this);
+        MaterialSwitch toggle = new MaterialSwitch(this);
         toggle.setText(label);
         toggle.setChecked(initial);
-        toggle.setTextSize(14);
-        toggle.setPadding(0, dp(10), 0, dp(10));
+        toggle.setTextAppearance(com.google.android.material.R.style
+                .TextAppearance_Material3_BodyMedium);
+        int pad = dp(6);
+        toggle.setPadding(0, pad, 0, pad);
         toggle.setOnCheckedChangeListener((v, checked) -> listener.onChecked(checked));
         return toggle;
     }
@@ -525,6 +580,22 @@ public class MainActivity extends Activity {
     private int dp(int value) {
         return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value,
                 getResources().getDisplayMetrics());
+    }
+
+    private static String pad(String value, int width) {
+        StringBuilder sb = new StringBuilder(value);
+        while (sb.length() < width) {
+            sb.append(' ');
+        }
+        return sb.toString();
+    }
+
+    private static String trim(String value, int limit) {
+        if (value == null) {
+            return "";
+        }
+        String flat = value.trim();
+        return flat.length() <= limit ? flat : flat.substring(0, limit) + "…";
     }
 
     private void copy(String label, String value) {

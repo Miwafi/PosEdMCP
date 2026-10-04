@@ -26,6 +26,7 @@
         android:description="@string/xposed_description"
         android:icon="@drawable/ic_launcher"
         android:supportsRtl="true"
+        android:theme="@style/Theme.PosEdMCP"
         android:usesCleartextTraffic="true"
         android:largeHeap="true"
         tools:ignore="AllowBackup">
