@@ -88,6 +88,11 @@
 
 如果需要撤销，`plugin_invoke(method="deleteAlarmByLabel", args_json="{\"label\":\"PosEdMCP\"}")`
 会删掉标签里含 PosEdMCP 的闹钟。
+
+**注意**：这个删除调用在本机上实测会超过 `plugin_invoke` 的 20 秒上限，于是返回一条
+"timed out" —— **但闹钟确实已经删掉了**。别看到超时就以为没生效，去时钟应用里确认一下。
+删除是两条 provider 调用（先 `get_alarm_list` 再 `delete_alarm`），慢在那一步。
+新增（`addAlarm`）不受影响，几秒内就返回。
 ```
 
 ## 这个 demo 为什么能成立
