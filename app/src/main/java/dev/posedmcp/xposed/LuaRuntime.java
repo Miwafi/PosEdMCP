@@ -1,0 +1,965 @@
+package dev.posedmcp.xposed;
+
+import android.content.Context;
+
+import org.json.JSONObject;
+import org.luaj.vm2.Globals;
+import org.luaj.vm2.LoadState;
+import org.luaj.vm2.LuaError;
+import org.luaj.vm2.LuaTable;
+import org.luaj.vm2.LuaUserdata;
+import org.luaj.vm2.LuaValue;
+import org.luaj.vm2.Varargs;
+import org.luaj.vm2.compiler.LuaC;
+import org.luaj.vm2.lib.Bit32Lib;
+import org.luaj.vm2.lib.CoroutineLib;
+import org.luaj.vm2.lib.DebugLib;
+import org.luaj.vm2.lib.PackageLib;
+import org.luaj.vm2.lib.StringLib;
+import org.luaj.vm2.lib.TableLib;
+import org.luaj.vm2.lib.VarArgFunction;
+import org.luaj.vm2.lib.jse.CoerceJavaToLua;
+import org.luaj.vm2.lib.jse.CoerceLuaToJava;
+import org.luaj.vm2.lib.jse.JseBaseLib;
+import org.luaj.vm2.lib.jse.JseMathLib;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStreamReader;
+import java.io.PrintStream;
+import java.io.Reader;
+import java.lang.reflect.Array;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+
+import dev.posedmcp.Logx;
+
+/**
+ * Runs a Lua script inside a target application's process.
+ *
+ * <p>This exists because the alternative for injected logic - hand-written smali,
+ * assembled to a DEX - puts a register machine on the model, and its mistakes are
+ * silent. A guard branch with the wrong polarity lists nothing, appends nothing
+ * and throws nothing, which is indistinguishable from "the data is not there";
+ * that is exactly how a probe inside the GitHub app concluded the app was signed
+ * out when it was not. A script is a much smaller thing to get right, and it is
+ * readable text in the confirmation prompt, so the user can see what they are
+ * approving.
+ *
+ * <p>The interpreter ships as part of this module, so it is already in the
+ * target process - no compile step, no DEX over the bridge, no load. What a
+ * script can reach is deliberately the same set of things the tools already do
+ * (the application's Context, its class loader, its methods including private
+ * ones, its fields, its files). It is a new syntax for existing privileges, not
+ * a new privilege.
+ */
+public final class LuaRuntime {
+
+    /** Roughly a second of pure-Lua work; a probe that needs more is not a probe. */
+    public static final long DEFAULT_MAX_INSTRUCTIONS = 50_000_000L;
+
+    private static final int MAX_OUTPUT_CHARS = 8_000;
+    private static final int MAX_READ_CHARS = 200_000;
+    private static final int MAX_METHOD_LIST = 500;
+    private static final int MAX_TABLE_ENTRIES = 100;
+    private static final int MAX_ARRAY_ENTRIES = 100_000;
+
+    private LuaRuntime() {
+    }
+
+    /**
+     * Stops a script that will never finish.
+     *
+     * <p>Scripts are not sandboxed from the application, so an endless loop pins
+     * a thread in it - the app looks hung and the platform eventually kills it,
+     * which is the outcome this whole design is trying to avoid. Counting
+     * instructions costs about 2x on pure-Lua work, which is worth paying.
+     *
+     * <p>The script cannot turn this off. The hook lives on the VM, not in the
+     * environment the script can reach: dropping or re-pointing {@code debug}
+     * makes no difference.
+     */
+    private static final class Budget extends DebugLib {
+        private final long limit;
+        private long used;
+
+        Budget(long limit) {
+            this.limit = limit;
+        }
+
+        long used() {
+            return used;
+        }
+
+        long limit() {
+            return limit;
+        }
+
+        @Override
+        public void onInstruction(int pc, Varargs v, int top) {
+            super.onInstruction(pc, v, top);
+            if (++used > limit) {
+                throw new LuaError("stopped after " + limit + " vm instructions - the script"
+                        + " either loops forever or is doing far more work than this tool is"
+                        + " for. Say what you were trying to do instead of retrying as-is.");
+            }
+        }
+    }
+
+    public static JSONObject exec(String packageName, ClassLoader appClassLoader,
+            Context appContext, String source, long maxInstructions) throws Exception {
+        if (source == null || source.trim().isEmpty()) {
+            throw new IllegalArgumentException("source is required");
+        }
+        long limit = maxInstructions > 0 ? maxInstructions : DEFAULT_MAX_INSTRUCTIONS;
+
+        ByteArrayOutputStream captured = new ByteArrayOutputStream();
+        PrintStream out = new PrintStream(captured, true, "UTF-8");
+
+        Budget budget = new Budget(limit);
+        Globals globals = globals(out, budget);
+        globals.set("app", host(packageName, appClassLoader, appContext, out));
+
+        long startedAt = System.currentTimeMillis();
+        try {
+            // Compilation errors land here, with the offending line - the single
+            // biggest thing a script has over a hand-written DEX.
+            LuaValue chunk = globals.load(source, "lua_exec");
+            LuaValue returned = chunk.call();
+            return result(true, describe(returned), null, captured, budget, startedAt);
+        } catch (LuaError e) {
+            return result(false, null, e.getMessage(), captured, budget, startedAt);
+        } catch (Throwable t) {
+            // StackOverflowError from runaway recursion, OutOfMemoryError from a
+            // script that builds a huge table - both should be reported rather
+            // than allowed to take the target process down silently.
+            return result(false, null, t.getClass().getSimpleName() + ": " + t.getMessage(),
+                    captured, budget, startedAt);
+        }
+    }
+
+    /**
+     * A curated environment: base, table, string, math, bit32, coroutine.
+     *
+     * <p>No {@code io} and no {@code os}. Those would hand a script a way to
+     * touch the filesystem and spawn processes that nothing else in this module
+     * offers, which would make the tool surface a lie - the bridges and the root
+     * shell are meant to be the only doors. File access is available, but through
+     * {@code app.files} / {@code app.read}, which are read-only and say so.
+     */
+    private static Globals globals(PrintStream out, Budget budget) {
+        Globals g = new Globals();
+        g.load(new JseBaseLib());
+        g.load(new PackageLib());
+        g.load(new Bit32Lib());
+        g.load(new TableLib());
+        g.load(new StringLib());
+        g.load(new CoroutineLib());
+        g.load(new JseMathLib());
+        LoadState.install(g);
+        LuaC.install(g);
+        g.STDOUT = out;
+        g.STDERR = out;
+        budget.call(g, g);
+        return g;
+    }
+
+    // ---- the host API ------------------------------------------------------
+
+    private interface Body {
+        LuaValue call(Varargs args) throws Exception;
+    }
+
+    private static VarArgFunction fn(Body body) {
+        return new VarArgFunction() {
+            @Override
+            public Varargs invoke(Varargs args) {
+                try {
+                    return body.call(args);
+                } catch (LuaError e) {
+                    throw e;
+                } catch (Throwable t) {
+                    throw new LuaError(messageOf(t));
+                }
+            }
+        };
+    }
+
+    private static LuaTable host(String packageName, ClassLoader loader, Context context,
+            PrintStream out) {
+        LuaTable host = new LuaTable();
+        host.set("name", fn(a -> LuaValue.valueOf(packageName)));
+        host.set("uid", fn(a -> LuaValue.valueOf(android.os.Process.myUid())));
+        host.set("context", fn(a -> coerce(context)));
+        host.set("loader", fn(a -> coerce(loader)));
+
+        host.set("class", fn(a -> {
+            String name = a.checkjstring(1);
+            try {
+                return coerce(Class.forName(name, false, loader));
+            } catch (Throwable t) {
+                // A miss is an ordinary answer here: an obfuscated app is full of
+                // names that survive as strings with no class behind them.
+                return LuaValue.NIL;
+            }
+        }));
+
+        host.set("new", fn(a -> coerce(constructSpec(a.arg(1), rest(a, 1), loader))));
+
+        host.set("call", fn(a -> coerce(call(toJava(a.arg(1)), a.checkjstring(2), rest(a, 2)))));
+
+        host.set("get", fn(a -> {
+            Object target = toJava(a.arg(1));
+            return coerce(field(target, a.checkjstring(2)).get(staticReceiver(target)));
+        }));
+
+        host.set("set", fn(a -> {
+            Object target = toJava(a.arg(1));
+            Field f = field(target, a.checkjstring(2));
+            f.set(staticReceiver(target), convert(a.arg(3), f.getType()));
+            return LuaValue.NIL;
+        }));
+
+        host.set("methods", fn(a -> methods(toJava(a.arg(1)),
+                a.narg() > 1 && !a.arg(2).isnil() ? a.arg(2).tojstring() : "")));
+
+        host.set("exists", fn(a -> LuaValue.valueOf(new File(a.checkjstring(1)).exists())));
+
+        host.set("files", fn(a -> listFiles(a.checkjstring(1))));
+
+        host.set("read", fn(a -> {
+            int max = a.narg() > 1 && a.arg(2).isint() ? a.arg(2).toint() : MAX_READ_CHARS;
+            return LuaValue.valueOf(readText(a.checkjstring(1), max));
+        }));
+
+        host.set("log", fn(a -> {
+            String text = a.narg() > 0 ? a.arg(1).tojstring() : "";
+            Logx.i("[" + packageName + "] " + text);
+            out.println(text);
+            return LuaValue.NIL;
+        }));
+
+        return host;
+    }
+
+    // ---- reflection --------------------------------------------------------
+
+    private static Class<?> classOf(LuaValue value, ClassLoader loader) throws Exception {
+        Object java = toJava(value);
+        if (java instanceof Class) {
+            return (Class<?>) java;
+        }
+        if (java instanceof String) {
+            return Class.forName((String) java, false, loader);
+        }
+        throw new LuaError("expected a class - get one with app.class(\"...\")");
+    }
+
+    /**
+     * Resolves app.new's first argument: a class, a class name, or a class name
+     * carrying the constructor to use - {@code "java.util.Date(long)"}. The last
+     * form is how a constructor that fits several ways gets picked deliberately;
+     * it is the same spelling app.methods prints for one.
+     */
+    private static Object constructSpec(LuaValue first, LuaValue[] args, ClassLoader loader)
+            throws Exception {
+        if (!first.isstring()) {
+            return construct(classOf(first, loader), args, null);
+        }
+        String spec = first.tojstring();
+        int paren = spec.indexOf('(');
+        if (paren <= 0 || !spec.endsWith(")")) {
+            return construct(Class.forName(spec, false, loader), args, null);
+        }
+        String inner = spec.substring(paren + 1, spec.length() - 1).trim();
+        String[] wanted = inner.isEmpty() ? new String[0] : inner.split("\\s*,\\s*");
+        return construct(Class.forName(spec.substring(0, paren).trim(), false, loader), args, wanted);
+    }
+
+    /** {@code null} for a class (a static member's receiver), the object otherwise. */
+    private static Object staticReceiver(Object target) {
+        return target instanceof Class ? null : target;
+    }
+
+    private static Object call(Object target, String spec, LuaValue[] args) throws Exception {
+        if (target == null) {
+            throw new LuaError("app.call needs a target: a class for a static call, or an"
+                    + " instance. Got nil.");
+        }
+        if (spec == null || spec.isEmpty()) {
+            throw new LuaError("app.call needs a method name");
+        }
+        boolean statics = target instanceof Class;
+        Class<?> owner = statics ? (Class<?>) target : target.getClass();
+        String searched = statics ? owner.getName() : target.getClass().getName();
+
+        // "put(String,String)" names one overload outright. It is the same form
+        // app.methods prints, so a signature can be pasted straight back.
+        String methodName = spec;
+        String[] wanted = null;
+        int paren = spec.indexOf('(');
+        if (paren > 0 && spec.endsWith(")")) {
+            methodName = spec.substring(0, paren).trim();
+            String inner = spec.substring(paren + 1, spec.length() - 1).trim();
+            wanted = inner.isEmpty() ? new String[0] : inner.split("\\s*,\\s*");
+        }
+
+        // Walk up the hierarchy: the receiver's own class often does not declare
+        // the method, and an implementation class declares no more than it
+        // overrides. The first class with a match at this arity wins, the way
+        // Java would resolve it.
+        Search found = search(owner, methodName, args.length, wanted);
+        if (found.matching == null && statics) {
+            // A Class is an object too. app.call(SomeClass, "getName") is asking
+            // about the class, not for a static called getName on it, so when the
+            // class has no such static, look on java.lang.Class itself.
+            statics = false;
+            owner = Class.class;
+            found = search(Class.class, methodName, args.length, wanted);
+        }
+        List<Method> matching = found.matching;
+        if (matching == null) {
+            // A signature that matched nothing is a dead end unless the ones
+            // that do exist are visible.
+            String available = wanted == null || found.sameShape == null ? ""
+                    : " The ones there take: " + signatures(found.sameShape) + ".";
+            throw new LuaError("no method " + spec + " on " + searched + " taking " + args.length
+                    + " argument(s), in its superclasses either." + available
+                    + " app.methods(target, name) lists what is there.");
+        }
+        if (wanted != null && matching.size() > 1) {
+            throw new LuaError("more than one method on " + owner.getName()
+                    + " matches that signature: " + signatures(matching));
+        }
+
+        Method method;
+        if (wanted != null || matching.size() == 1) {
+            method = matching.get(0);
+        } else {
+            // Arity alone cannot decide - ContentValues.put alone has nine
+            // two-argument forms, so every script touching a ContentValues would
+            // stop dead here. Score the values instead; a genuine tie is still
+            // refused rather than guessed.
+            method = null;
+            int bestScore = -1;
+            boolean tied = false;
+            for (Method candidate : matching) {
+                int score = scoreArgList(args, candidate.getParameterTypes());
+                if (score < 0) {
+                    continue;
+                }
+                if (score > bestScore) {
+                    bestScore = score;
+                    method = candidate;
+                    tied = false;
+                } else if (score == bestScore) {
+                    tied = true;
+                }
+            }
+            if (method == null) {
+                throw new LuaError("no " + methodName + " on " + owner.getName()
+                        + " accepts these argument types: " + signatures(matching));
+            }
+            if (tied) {
+                throw new LuaError(methodName + " is ambiguous for these arguments on "
+                        + owner.getName() + ": " + signatures(matching)
+                        + ". Name the overload you want the way app.methods prints it, e.g."
+                        + " app.call(target, \"" + signatureOf(matching.get(0)) + "\", ...).");
+            }
+        }
+
+        if (!Modifier.isStatic(method.getModifiers()) && statics) {
+            throw new LuaError(methodName + " is an instance method; pass the instance rather"
+                    + " than its class");
+        }
+
+        // The effective staticness, after the Class fallback above - deciding the
+        // receiver from the target's own type would send null to a method that
+        // is being called on the Class object.
+        Object receiver = statics ? null : target;
+        Class<?>[] types = method.getParameterTypes();
+        Object[] converted = new Object[args.length];
+        for (int i = 0; i < args.length; i++) {
+            converted[i] = convert(args[i], types[i]);
+        }
+        method.setAccessible(true);
+        try {
+            return method.invoke(receiver, converted);
+        } catch (InvocationTargetException e) {
+            // The application's own exception is the interesting part.
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            throw new LuaError(methodName + " threw " + cause.getClass().getName() + ": "
+                    + cause.getMessage());
+        } catch (IllegalArgumentException e) {
+            throw new LuaError(signatureOf(method) + " will not accept "
+                    + describeArgs(converted) + " (" + e.getClass().getSimpleName()
+                    + (e.getMessage() == null ? "" : ": " + e.getMessage()) + ")");
+        }
+    }
+
+    private static String describeArgs(Object[] args) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < args.length; i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append(args[i] == null ? "null" : args[i].getClass().getSimpleName());
+        }
+        return sb.length() == 0 ? "no arguments" : sb.toString();
+    }
+
+    private static Object construct(Class<?> owner, LuaValue[] args, String[] wanted)
+            throws Exception {
+        List<Constructor<?>> all = new ArrayList<>();
+        List<Constructor<?>> matching = new ArrayList<>();
+        for (Constructor<?> c : owner.getDeclaredConstructors()) {
+            if (c.getParameterCount() != args.length) {
+                continue;
+            }
+            all.add(c);
+            if (wanted == null || matchesSignature(c.getParameterTypes(), wanted)) {
+                matching.add(c);
+            }
+        }
+        if (matching.isEmpty()) {
+            // As with methods: a signature that matched nothing is a dead end
+            // unless the ones that do exist are visible.
+            String available = wanted == null || all.isEmpty() ? ""
+                    : " The ones there take: " + constructorSignatures(all) + ".";
+            throw new LuaError("no constructor on " + owner.getName() + " taking " + args.length
+                    + " argument(s)" + available);
+        }
+        if (wanted != null && matching.size() > 1) {
+            throw new LuaError("more than one constructor on " + owner.getName()
+                    + " matches that signature: " + constructorSignatures(matching));
+        }
+
+        Constructor<?> constructor = matching.get(0);
+        if (wanted == null && matching.size() > 1) {
+            int bestScore = -1;
+            boolean tied = false;
+            for (Constructor<?> candidate : matching) {
+                int score = scoreArgList(args, candidate.getParameterTypes());
+                if (score < 0) {
+                    continue;
+                }
+                if (score > bestScore) {
+                    bestScore = score;
+                    constructor = candidate;
+                    tied = false;
+                } else if (score == bestScore) {
+                    tied = true;
+                }
+            }
+            if (bestScore < 0) {
+                throw new LuaError("no constructor on " + owner.getName()
+                        + " accepts these argument types: " + constructorSignatures(matching));
+            }
+            if (tied) {
+                throw new LuaError(owner.getName() + " has several constructors taking "
+                        + args.length + " argument(s) that fit these values equally well: "
+                        + constructorSignatures(matching) + ". Pick one by signature, e.g."
+                        + " app.new(\"" + owner.getName() + "("
+                        + typeList(matching.get(0).getParameterTypes()) + ")\", ...).");
+            }
+        }
+        Class<?>[] types = constructor.getParameterTypes();
+        Object[] converted = new Object[args.length];
+        for (int i = 0; i < args.length; i++) {
+            converted[i] = convert(args[i], types[i]);
+        }
+        constructor.setAccessible(true);
+        String signature = "<init>(" + typeList(constructor.getParameterTypes()) + ")";
+        try {
+            return constructor.newInstance(converted);
+        } catch (InvocationTargetException e) {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            throw new LuaError(owner.getName() + signature + " threw " + cause.getClass().getName()
+                    + ": " + cause.getMessage());
+        } catch (IllegalArgumentException e) {
+            // Thrown directly, not wrapped: reflection could not use what it was
+            // given. Saying so - and which signature was chosen - is the whole
+            // difference between a self-explaining failure and "null".
+            throw new LuaError(owner.getName() + signature + " will not accept "
+                    + describeArgs(converted) + " (" + e.getClass().getSimpleName()
+                    + (e.getMessage() == null ? "" : ": " + e.getMessage()) + ")");
+        }
+    }
+
+    private static Field field(Object target, String name) throws Exception {
+        if (target == null) {
+            throw new LuaError("app.get/app.set need a target; got nil");
+        }
+        Class<?> owner = target instanceof Class ? (Class<?>) target : target.getClass();
+        for (Class<?> c = owner; c != null; c = c.getSuperclass()) {
+            try {
+                Field f = c.getDeclaredField(name);
+                f.setAccessible(true);
+                return f;
+            } catch (NoSuchFieldException ignored) {
+                // Keep walking up: a field is often declared on the superclass.
+            }
+        }
+        throw new LuaError("no field " + name + " on " + owner.getName()
+                + " (searched its superclasses too)");
+    }
+
+    private static LuaTable listFiles(String path) {
+        File dir = new File(path);
+        // Deliberately loud. Silently returning an empty table is what let a
+        // probe conclude "the app has no data" when the listing had simply
+        // failed, so an empty table here means exactly one thing: the directory
+        // exists and is empty.
+        if (!dir.exists()) {
+            throw new LuaError("no such directory: " + path);
+        }
+        if (!dir.isDirectory()) {
+            throw new LuaError("not a directory: " + path + " (use app.read for a file)");
+        }
+        File[] children = dir.listFiles();
+        if (children == null) {
+            throw new LuaError("cannot list " + path + " - permission or I/O error");
+        }
+        LuaTable table = new LuaTable();
+        int i = 1;
+        for (File child : children) {
+            LuaTable entry = new LuaTable();
+            entry.set("name", LuaValue.valueOf(child.getName()));
+            entry.set("dir", LuaValue.valueOf(child.isDirectory()));
+            entry.set("size", LuaValue.valueOf(child.length()));
+            table.set(i++, entry);
+        }
+        return table;
+    }
+
+    private static String readText(String path, int max) throws Exception {
+        File file = new File(path);
+        if (!file.exists()) {
+            throw new LuaError("no such file: " + path);
+        }
+        StringBuilder sb = new StringBuilder();
+        try (Reader reader = new InputStreamReader(new FileInputStream(file), "UTF-8")) {
+            char[] buffer = new char[8192];
+            int read;
+            while (sb.length() < max && (read = reader.read(buffer)) != -1) {
+                sb.append(buffer, 0, Math.min(read, max - sb.length()));
+            }
+        }
+        return sb.toString();
+    }
+
+    private static LuaTable methods(Object target, String filter) {
+        if (target == null) {
+            throw new LuaError("app.methods needs a class or an instance; got nil");
+        }
+        Class<?> owner = target instanceof Class ? (Class<?>) target : target.getClass();
+        LuaTable table = new LuaTable();
+        int i = 1;
+        // Constructors first, and only for an unfiltered listing: app.new is the
+        // harder of the two to guess at, so this is where its options show up.
+        if (filter.isEmpty()) {
+            for (Constructor<?> c : owner.getDeclaredConstructors()) {
+                if (i >= MAX_METHOD_LIST) {
+                    break;
+                }
+                table.set(i++, LuaValue.valueOf("<init>(" + typeList(c.getParameterTypes()) + ")"));
+            }
+        }
+        for (Method m : owner.getDeclaredMethods()) {
+            if (!filter.isEmpty() && !m.getName().contains(filter)) {
+                continue;
+            }
+            if (i > MAX_METHOD_LIST) {
+                table.set(i, LuaValue.valueOf("... more than " + MAX_METHOD_LIST + " match"));
+                break;
+            }
+            table.set(i++, LuaValue.valueOf(signatureOf(m)
+                    + (Modifier.isStatic(m.getModifiers()) ? " static" : "")));
+        }
+        return table;
+    }
+
+    // ---- coercion and rendering -------------------------------------------
+
+    /** Lua values that carry a Java object back out to Java. Type-tested, not coerced. */
+    private static Object toJava(LuaValue value) {
+        if (value == null) {
+            return null;
+        }
+        switch (value.type()) {
+            case LuaValue.TNIL:
+                return null;
+            case LuaValue.TUSERDATA:
+                return ((LuaUserdata) value).m_instance;
+            case LuaValue.TSTRING:
+                return value.tojstring();
+            case LuaValue.TBOOLEAN:
+                return value.toboolean();
+            case LuaValue.TNUMBER:
+                return value.isint() ? (Object) value.toint() : (Object) value.todouble();
+            default:
+                return null;
+        }
+    }
+
+    /**
+     * Wraps a Java value for Lua.
+     *
+     * <p>Strings and numbers become Lua values rather than userdata, because a
+     * userdata will not concatenate - {@code "id=" .. app.uid()} has to work for
+     * the environment to feel like Lua at all.
+     *
+     * <p>Arrays become real tables rather than LuaJ's array userdata. Gradle-free
+     * though that userdata is, it does not survive {@code ipairs}, and "iterate
+     * the accounts" is exactly the kind of thing a script is written to do.
+     */
+    private static LuaValue coerce(Object value) {
+        if (value == null) {
+            return LuaValue.NIL;
+        }
+        if (value.getClass().isArray()) {
+            int length = Array.getLength(value);
+            if (length > MAX_ARRAY_ENTRIES) {
+                throw new LuaError("refusing to convert a " + length + "-element array into a"
+                        + " table; read it in pieces instead");
+            }
+            LuaTable table = new LuaTable();
+            for (int i = 0; i < length; i++) {
+                table.set(i + 1, coerce(Array.get(value, i)));
+            }
+            return table;
+        }
+        if (value instanceof String) {
+            return LuaValue.valueOf((String) value);
+        }
+        if (value instanceof Boolean) {
+            return LuaValue.valueOf((Boolean) value);
+        }
+        if (value instanceof Integer) {
+            return LuaValue.valueOf((Integer) value);
+        }
+        if (value instanceof Long) {
+            return LuaValue.valueOf((Long) value);
+        }
+        if (value instanceof Double || value instanceof Float) {
+            return LuaValue.valueOf(((Number) value).doubleValue());
+        }
+        return CoerceJavaToLua.coerce(value);
+    }
+
+    private static LuaValue[] rest(Varargs args, int skip) {
+        int count = Math.max(0, args.narg() - skip);
+        LuaValue[] out = new LuaValue[count];
+        for (int i = 0; i < count; i++) {
+            out[i] = args.arg(skip + 1 + i);
+        }
+        return out;
+    }
+
+    private static Object describe(LuaValue value) {
+        if (value == null) {
+            return JSONObject.NULL;
+        }
+        switch (value.type()) {
+            case LuaValue.TNIL:
+                return JSONObject.NULL;
+            case LuaValue.TBOOLEAN:
+                return value.toboolean();
+            case LuaValue.TNUMBER:
+                return value.isint() ? (Object) value.toint() : (Object) value.todouble();
+            case LuaValue.TSTRING:
+                return value.tojstring();
+            case LuaValue.TTABLE:
+                return describeTable((LuaTable) value);
+            default:
+                return value.tojstring();
+        }
+    }
+
+    /** One level deep: a probe returning a table wants to see what is in it. */
+    private static String describeTable(LuaTable table) {
+        StringBuilder sb = new StringBuilder("{");
+        LuaValue key = LuaValue.NIL;
+        int shown = 0;
+        while (true) {
+            Varargs pair = table.next(key);
+            key = pair.arg1();
+            if (key.isnil()) {
+                break;
+            }
+            if (shown > 0) {
+                sb.append(", ");
+            }
+            if (++shown > MAX_TABLE_ENTRIES) {
+                sb.append("...");
+                break;
+            }
+            LuaValue entry = pair.arg(2);
+            sb.append(key.tojstring()).append('=');
+            if (entry.istable()) {
+                sb.append("{...}");
+            } else if (entry.isuserdata()) {
+                sb.append(userdataText(entry));
+            } else {
+                sb.append(entry.tojstring());
+            }
+        }
+        return sb.append('}').toString();
+    }
+
+    private static String userdataText(LuaValue value) {
+        Object java = ((LuaUserdata) value).m_instance;
+        if (java == null) {
+            return "nil";
+        }
+        try {
+            String text = String.valueOf(java);
+            return text.length() <= 200 ? text : text.substring(0, 200) + "...";
+        } catch (Throwable t) {
+            return "<" + java.getClass().getName() + ">";
+        }
+    }
+
+    private static JSONObject result(boolean ok, Object returned, String error,
+            ByteArrayOutputStream captured, Budget budget, long startedAt) throws Exception {
+        JSONObject out = new JSONObject();
+        out.put("ok", ok);
+        if (ok) {
+            out.put("returned", returned);
+        } else {
+            out.put("error", error == null ? "unknown error" : error);
+        }
+        String output = captured.toString("UTF-8");
+        out.put("output", output.length() <= MAX_OUTPUT_CHARS ? output
+                : output.substring(0, MAX_OUTPUT_CHARS) + "\n... output truncated");
+        out.put("instructions", budget.used());
+        out.put("maxInstructions", budget.limit());
+        out.put("durationMs", System.currentTimeMillis() - startedAt);
+        return out;
+    }
+
+    private static String messageOf(Throwable t) {
+        Throwable cause = t instanceof InvocationTargetException && t.getCause() != null
+                ? t.getCause() : t;
+        String message = cause.getMessage();
+        return cause.getClass().getSimpleName() + (message == null ? "" : ": " + message);
+    }
+
+    /** Total fit of a set of values against one parameter list; negative means impossible. */
+    private static int scoreArgList(LuaValue[] args, Class<?>[] types) {
+        int total = 0;
+        for (int i = 0; i < args.length; i++) {
+            int cost = fit(args[i], types[i]);
+            if (cost < 0) {
+                return -1;
+            }
+            total += cost;
+        }
+        return total;
+    }
+
+    /**
+     * How well one Lua value fits one Java parameter; negative means it cannot.
+     *
+     * <p>Dispatch is on {@link LuaValue#type()}, never on {@code isstring()} or
+     * {@code isnumber()}: in LuaJ those are <em>coercion</em> predicates, not type
+     * tests. A number answers true to {@code isstring()}, and the string "123"
+     * answers true to {@code isnumber()}. Branching on them silently prefers
+     * Date(String) over Date(long) for a number, makes every numeric overload of
+     * Math.max tie, and stores "123" as an Integer.
+     */
+    private static int fit(LuaValue value, Class<?> type) {
+        switch (value.type()) {
+            case LuaValue.TNIL:
+                // null fits any reference; it cannot fit a primitive.
+                return type.isPrimitive() ? -1 : 0;
+            case LuaValue.TUSERDATA: {
+                Object java = ((LuaUserdata) value).m_instance;
+                if (java == null) {
+                    return type.isPrimitive() ? -1 : 0;
+                }
+                if (!type.isInstance(java)) {
+                    return -1;
+                }
+                return type == Object.class ? 20 : 100;
+            }
+            case LuaValue.TBOOLEAN:
+                if (type == boolean.class || type == Boolean.class) {
+                    return 101;
+                }
+                if (type == Object.class) {
+                    return 20;
+                }
+                return type == String.class || type == CharSequence.class ? 15 : -1;
+            case LuaValue.TNUMBER: {
+                boolean whole = value.isint();
+                if (type == int.class || type == Integer.class) return whole ? 101 : 60;
+                if (type == long.class || type == Long.class) return whole ? 91 : 65;
+                if (type == short.class || type == Short.class) return whole ? 61 : -1;
+                if (type == byte.class || type == Byte.class) return whole ? 51 : -1;
+                if (type == double.class || type == Double.class) return whole ? 80 : 101;
+                if (type == float.class || type == Float.class) return whole ? 70 : 91;
+                if (type == char.class || type == Character.class) return whole ? 40 : -1;
+                if (type == Object.class) return 20;
+                if (type == String.class || type == CharSequence.class) return 25;
+                return -1;
+            }
+            case LuaValue.TSTRING:
+                if (type == String.class) {
+                    return 100;
+                }
+                if (type == CharSequence.class) {
+                    return 90;
+                }
+                if (type == Object.class) {
+                    return 20;
+                }
+                if (type == char.class || type == Character.class) {
+                    return 40;
+                }
+                return isNumeric(type) || type == boolean.class || type == Boolean.class ? 15 : -1;
+            case LuaValue.TTABLE:
+                if (type.isArray()) return 60;
+                if (Collection.class.isAssignableFrom(type)) return 40;
+                if (Map.class.isAssignableFrom(type)) return 30;
+                return type == Object.class ? 20 : -1;
+            default:
+                return -1;
+        }
+    }
+
+    /**
+     * Converts one Lua value to one Java parameter type.
+     *
+     * <p>LuaJ's coercion table is keyed by the boxed types, so a primitive
+     * parameter has to be boxed first or the lookup misses and returns null -
+     * which then fails as "constructor threw IllegalArgumentException: null",
+     * a message that says nothing about the real cause. Reflection unboxes on
+     * the way in, so handing it a Long for a long parameter is correct.
+     */
+    private static Object convert(LuaValue value, Class<?> type) {
+        return CoerceLuaToJava.coerce(value, boxed(type));
+    }
+
+    private static Class<?> boxed(Class<?> type) {
+        if (!type.isPrimitive()) {
+            return type;
+        }
+        if (type == int.class) return Integer.class;
+        if (type == long.class) return Long.class;
+        if (type == double.class) return Double.class;
+        if (type == float.class) return Float.class;
+        if (type == short.class) return Short.class;
+        if (type == byte.class) return Byte.class;
+        if (type == boolean.class) return Boolean.class;
+        if (type == char.class) return Character.class;
+        return type;
+    }
+
+    private static boolean isNumeric(Class<?> type) {
+        return type == int.class || type == Integer.class
+                || type == long.class || type == Long.class
+                || type == short.class || type == Short.class
+                || type == byte.class || type == Byte.class
+                || type == double.class || type == Double.class
+                || type == float.class || type == Float.class;
+    }
+
+    /**
+     * What {@code app.call} found when it looked for a method.
+     *
+     * <p>The search walks up from the receiver's own class, which is the way
+     * Java resolves it: an implementation class declares no more than it
+     * overrides, and a method is often declared on a superclass.
+     */
+    private static final class Search {
+        /** Candidates, or {@code null} when nothing matched. */
+        List<Method> matching;
+        /** Everything at this name and arity, ignoring the wanted signature. */
+        List<Method> sameShape;
+    }
+
+    private static Search search(Class<?> owner, String methodName, int arity, String[] wanted) {
+        Search result = new Search();
+        for (Class<?> c = owner; c != null && result.matching == null; c = c.getSuperclass()) {
+            List<Method> here = new ArrayList<>();
+            List<Method> shape = new ArrayList<>();
+            for (Method m : c.getDeclaredMethods()) {
+                if (!m.getName().equals(methodName) || m.getParameterCount() != arity) {
+                    continue;
+                }
+                shape.add(m);
+                if (wanted == null || matchesSignature(m.getParameterTypes(), wanted)) {
+                    here.add(m);
+                }
+            }
+            if (result.sameShape == null && !shape.isEmpty()) {
+                result.sameShape = shape;
+            }
+            if (!here.isEmpty()) {
+                result.matching = here;
+            }
+        }
+        return result;
+    }
+
+    /** Matches a parameter list written after a name, e.g. {@code put(String,int)}. */
+    private static boolean matchesSignature(Class<?>[] types, String[] wanted) {
+        if (types.length != wanted.length) {
+            return false;
+        }
+        for (int i = 0; i < types.length; i++) {
+            String token = wanted[i];
+            if (!token.equals(types[i].getName()) && !token.equals(types[i].getSimpleName())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** The form app.methods prints and app.call takes back. */
+    private static String signatureOf(Method method) {
+        return method.getName() + "(" + typeList(method.getParameterTypes()) + ")";
+    }
+
+    private static String constructorSignatures(List<Constructor<?>> constructors) {
+        StringBuilder sb = new StringBuilder();
+        for (Constructor<?> c : constructors) {
+            if (sb.length() > 0) {
+                sb.append("; ");
+            }
+            sb.append("<init>(").append(typeList(c.getParameterTypes())).append(')');
+        }
+        return sb.toString();
+    }
+
+    private static String signatures(List<Method> methods) {
+        StringBuilder sb = new StringBuilder();
+        for (Method m : methods) {
+            if (sb.length() > 0) {
+                sb.append("; ");
+            }
+            sb.append(signatureOf(m));
+        }
+        return sb.toString();
+    }
+
+    private static String typeList(Class<?>[] types) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < types.length; i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append(types[i].getSimpleName());
+        }
+        return sb.toString();
+    }
+}

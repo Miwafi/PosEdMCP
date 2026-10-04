@@ -127,7 +127,7 @@ POSEDMCP_TOKEN=<token> ./tools/mcp-call.sh '{"jsonrpc":"2.0","id":1,"method":"to
 `smali_assemble`、`hook_records`。
 
 需要确认：`root_shell_exec`、`screen_capture`、`ui_dump`、`input_inject`、`plugin_load`、
-`plugin_invoke`、`hook_method`、`hook_clear`、`invoke_method`。
+`plugin_invoke`、`lua_exec`、`hook_method`、`hook_clear`、`invoke_method`。
 
 不确认但会改状态的只有一个：`launch_app`——把某个应用切到前台，等同于点它的图标。
 放在这里说是因为它不弹窗，而它确实会改变你屏幕上的东西。
@@ -150,7 +150,9 @@ hook_method             它运行时到底发生了什么（零 DEX，模块直�
    ↓
    ├─ 改动能用「值」表达（固定返回 / 换参数 / 改字段）→ 还是 hook_method。
    │  它是数据不是代码：不用编译，不碰 DEX，记录里标 altered 证明生效过。
-   └─ 改动是结构性的 → smali_assemble → plugin_load（在设备上写代码，不需要 PC）
+   ├─ 改动是「逻辑」（循环、分支、拼字符串、连着调好几个 API）→ lua_exec。
+   │  同样不用编译：解释器随模块一起进了目标进程。
+   └─ 既不是「值」也不是「逻辑」的结构性改动 → smali_assemble → plugin_load
 ```
 
 - 反汇编/汇编用 **baksmali/smali**，纯 Java，直接跑在 ART 上（apktool 不行，它的资源
@@ -163,6 +165,37 @@ hook_method             它运行时到底发生了什么（零 DEX，模块直�
   的**所有**进程，`hook_records` 合并各进程结果并标注来源。一个应用常有多个进程，
   只问其中一个会得到"没有 hook"这种误导性答案
 
+## 注入逻辑：为什么是 Lua
+
+`invoke_method` 能表达「一次调用」，`hook_method` 能表达「一次改动」，但有很多事这两者都
+表达不了：先列目录、再按结果决定下一步、把几个返回值拼起来、循环遍历一批对象。这些是
+**逻辑**，而在此之前唯一的出路是手写 smali。
+
+那条路对模型太陡，而且失败是**静默**的：一个空值守卫的分支极性写反，就什么都不列、
+什么都不追加、也不抛异常——看起来和「数据本来就不存在」一模一样。实测中，一个注入进
+GitHub 应用的探针正是这样得出「这个应用没登录」的结论，而它其实登录着。
+
+所以加了一个 Lua 解释器（LuaJ，纯 Java）：
+
+- **不需要编译。** 解释器随本模块一起被 LSPosed 注入目标进程，脚本没有组装、传输、加载
+  这几步——它只是文本。
+- **确认弹窗显示脚本本身。** 比 smali 可读得多：用户看到的就是要跑的东西。
+- **能力面没有扩大。** 脚本能碰到的东西和现有工具是同一套：应用的 Context、类加载器、
+  它的方法（含私有）、字段、文件。它是已有权限的新语法，不是新权限。
+- **没有 `io` 和 `os`。** 文件只能经 `app.files` / `app.read` 读，而且只读。
+- **不会挂死应用。** 脚本跑过指令预算即被中断，且这个护栏脚本自己关不掉。
+- **`app.files` 读不到目录时抛错，而不是返回空表。** 空表只意味着一件事：目录确实是空的。
+  这一条是专门针对上面那类静默失败定的。
+
+脚本拿到全局表 `app`：`name()`、`uid()`、`context()`、`class()`、`new()`、`call()`、
+`get()`、`set()`、`methods()`、`files()`、`exists()`、`read()`、`log()`。`app.call` 走
+`getDeclaredMethod` + `setAccessible`，沿继承链找方法，重载按**实参类型契合度**打分选择
+（`ContentValues` 有九个两参 `put`，`put("title","Dentist")` 仍能选中 `put(String,String)`）；
+真的打平时**拒绝并列出候选**而不是猜，此时可以按 `app.methods` 打印的写法指定：
+`app.call(values, "put(String,Integer)", "key", 5)`。
+
+smali 那条路保留：`invoke_method` 和 Lua 都表达不了的**结构性**改动仍然得走它。
+
 ## 架构
 
 ```
@@ -170,7 +203,7 @@ hook_method             它运行时到底发生了什么（零 DEX，模块直�
 │  McpService (前台服务)                                  │
 │    ├── HttpTransport  127.0.0.1:8765  /mcp              │
 │    ├── McpServer      JSON-RPC, 工具分发                │
-│    ├── ToolRegistry   23 个工具 + 确认策略               │
+│    ├── ToolRegistry   24 个工具 + 确认策略               │
 │    ├── ConfirmationGate ──> ConfirmOverlay (应用浮层)   │
 │    ├── BridgeServer   127.0.0.1:8766  (进程间桥)         │
 │    ├── RootShell      su, 管道 stdio（非 pty）           │
@@ -239,6 +272,9 @@ ContentProvider——能通就用，省掉一次弹窗。
   会先问 system_server 上一次的失败原因，跳过这条死路，直接走 root（一次确认）。
   其余 system 能力（前台追踪、事件、输入注入）均正常。
 - 没有单元测试。所有验证都是在真机上按行为做的。
+- **`lua_exec` 的指令预算只约束 Lua 本身。** 脚本如果把时间花在慢的 Java 调用上（网络、
+  文件），预算不会触发，只能靠桥的请求超时兜底——而超时后脚本所在线程仍会把当前调用跑完，
+  这一点和 `plugin_invoke` 一样。
 
 ### 调试隐藏 API 时的两个坑
 
@@ -274,6 +310,10 @@ Zygisk-LSPosed 1.10.2 (7182) 上验证：
   且 MCP 端点持续应答（修复前是 33/33 线程处于 `do_freezer_trap`、端点完全失联）
 - **无需 root 的界面操作**：`launch_app` 成功把 GitHub 应用切到前台（前台窗口为
   `com.github.android/.main.MainActivity`）
+- **`lua_exec` 在 `com.github.android` 进程内跑通**：脚本列出该应用数据目录的 8 个条目与
+  `shared_prefs` 下的 10 个文件，并读到它自己 `AccountManager` 里的 `yunqinglt /
+  com.github.android` —— 同一个检查用手写 smali 探针跑时返回了空串，并在阳性对照下暴露
+  出那是探针 bug 而不是设备状态
 
 ### 尚未验证
 

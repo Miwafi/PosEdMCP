@@ -115,6 +115,15 @@ public final class AppHost {
                     args.optString("instance_field", ""),
                     args.optString("instance_method", ""),
                     appClassLoader));
+            // Logic, rather than a single call. The interpreter is part of this
+            // module, so it is already here in the target process - nothing is
+            // compiled and nothing is pushed over the bridge.
+            bridge.registerHandler("lua_exec", args -> LuaRuntime.exec(
+                    packageName,
+                    appClassLoader,
+                    currentApplication(),
+                    args.optString("source", ""),
+                    args.optLong("max_instructions", LuaRuntime.DEFAULT_MAX_INSTRUCTIONS)));
             bridge.registerHandler("ping", args -> new JSONObject().put("pong", true)
                     .put("hooks", HookRegistry.snapshot().size()));
             bridge.start();
@@ -128,6 +137,21 @@ public final class AppHost {
         BridgeClient bridge = client;
         if (bridge != null) {
             bridge.emit(type, data);
+        }
+    }
+
+    /**
+     * The target application's own Context, or {@code null} while it is still
+     * starting. Reached through the framework's helper rather than anything we
+     * are handed, because a plugin and a script both need it and neither is
+     * given one by the loader.
+     */
+    static Context currentApplication() {
+        try {
+            return (Context) XposedHelpers.callStaticMethod(
+                    Class.forName("android.app.AndroidAppHelper"), "currentApplication");
+        } catch (Throwable t) {
+            return null;
         }
     }
 
@@ -290,12 +314,7 @@ public final class AppHost {
 
         @Override
         public Context appContext() {
-            try {
-                return (Context) XposedHelpers.callStaticMethod(
-                        Class.forName("android.app.AndroidAppHelper"), "currentApplication");
-            } catch (Throwable t) {
-                return null;
-            }
+            return currentApplication();
         }
 
         @Override

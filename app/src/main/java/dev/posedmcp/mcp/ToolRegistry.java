@@ -35,6 +35,7 @@ import dev.posedmcp.state.DeviceStatus;
 import dev.posedmcp.state.EventStore;
 import dev.posedmcp.state.Prefs;
 import dev.posedmcp.tools.Capabilities;
+import dev.posedmcp.xposed.LuaRuntime;
 
 /**
  * The tool surface exposed to agents.
@@ -783,6 +784,81 @@ public final class ToolRegistry {
                 .build());
 
         // =================================================================
+        // Scripted injection
+        // =================================================================
+
+        add(McpTool.of("lua_exec")
+                .title("Run a Lua script inside a scoped app")
+                .description("Runs Lua inside the target app's own process, with that app's"
+                        + " privileges. This is for logic - loops, conditionals, string building,"
+                        + " several calls in sequence. For a single call prefer invoke_method; to"
+                        + " change one method's behaviour use hook_method. A script is worth it"
+                        + " when the work cannot be expressed as one call."
+                        + " \n\nThe interpreter ships with this module, so it is already inside"
+                        + " the app: nothing is compiled and nothing is loaded first, unlike"
+                        + " plugin_load, which needs a DEX."
+                        + " \n\nThe script gets a global table `app`:"
+                        + " \n  app.name(), app.uid(), app.context(), app.loader()"
+                        + " \n  app.class(\"com.example.Foo\") - the class, or nil when nothing has"
+                        + " that name (obfuscated apps are full of names that survive only as"
+                        + " strings)"
+                        + " \n  app.new(target, ...) - construct. Pass a class, or a name carrying"
+                        + " the signature to use, e.g. \"java.util.Date(long)\", when several"
+                        + " constructors would fit equally well."
+                        + " \n  app.call(target, \"method\", ...) - call it. Pass the class for a"
+                        + " static call, an instance otherwise; private and unexported methods are"
+                        + " reachable. Overloads are picked by how well the values fit, so"
+                        + " put(\"key\", \"value\") still finds put(String, String) among the nine"
+                        + " two-argument forms on ContentValues. A genuine tie is refused with the"
+                        + " candidates listed; name the one you want exactly as app.methods prints"
+                        + " it, e.g. app.call(values, \"put(String,Integer)\", \"key\", 5)."
+                        + " \n  app.get(target, \"field\") and app.set(target, \"field\", value)"
+                        + " \n  app.methods(target, filter) - the declared methods as"
+                        + " \"name(types)\" strings, plus \"<init>(types)\" constructors when no"
+                        + " filter is given"
+                        + " \n  app.files(path) - {name=, dir=, size=} per entry"
+                        + " \n  app.exists(path), app.read(path[, maxChars])"
+                        + " \n  app.log(text) - into the module log"
+                        + " \nThere is no io and no os library; file access goes through"
+                        + " app.files and app.read, which only read."
+                        + " \n\nstdout and the returned value both come back in the result, and"
+                        + " errors carry a line number. app.files raises rather than returning an"
+                        + " empty list when it cannot read a directory, so an empty list means the"
+                        + " directory really is empty - it is not evidence that data is missing."
+                        + " \n\nThe script is stopped if it runs past its instruction budget, so"
+                        + " it cannot hang the target app. Always prompts.")
+                .mutating()
+                .input(props(
+                        "package", McpTool.string("Target package whose process runs the script"),
+                        "source", McpTool.string("Lua source. Return a value or print; both are"
+                                + " reported back."),
+                        "max_instructions", McpTool.integer("Instruction budget, default "
+                                + LuaRuntime.DEFAULT_MAX_INSTRUCTIONS),
+                        "reason", McpTool.string("What the script does and why. Shown to the"
+                                + " user.")),
+                        "package", "source", "reason")
+                .handler(args -> {
+                    String pkg = require(args, "package");
+                    String source = require(args, "source");
+                    String reason = require(args, "reason");
+
+                    requireConfirmation(ConfirmationGate.Kind.PLUGIN,
+                            "Run a script inside " + pkg,
+                            forPrompt(source),
+                            reason);
+
+                    requireAppPeer(pkg);
+                    JSONObject callArgs = new JSONObject();
+                    callArgs.put("source", source);
+                    callArgs.put("max_instructions",
+                            args.optLong("max_instructions", LuaRuntime.DEFAULT_MAX_INSTRUCTIONS));
+                    JSONObject out = capabilities.appCall(pkg, "lua_exec", callArgs, 30_000L);
+                    out.put("package", pkg);
+                    return McpTool.json(out);
+                })
+                .build());
+
+        // =================================================================
         // Runtime observation
         // =================================================================
 
@@ -1012,9 +1088,19 @@ public final class ToolRegistry {
     // Helpers
     // =====================================================================
 
+    /**
+     * The confirmation prompt shows the script itself - it is the thing being
+     * approved. Capped so a runaway paste cannot push the buttons off screen.
+     */
+    private static String forPrompt(String source) {
+        int limit = 4000;
+        return source.length() <= limit ? source
+                : source.substring(0, limit) + "\n... (" + (source.length() - limit)
+                        + " more characters)";
+    }
+
     private void requireConfirmation(ConfirmationGate.Kind kind, String title, String detail,
-            String reason) throws McpTool.ToolError {
-        ConfirmationGate.Decision decision = ConfirmationGate.request(context,
+            String reason) throws McpTool.ToolError {        ConfirmationGate.Decision decision = ConfirmationGate.request(context,
                 new ConfirmationGate.Request(kind, title, detail, reason, requester(),
                         prefs.confirmTimeoutMs()));
         if (!decision.approved) {
@@ -1085,6 +1171,7 @@ public final class ToolRegistry {
             o.put("ui_dump", "always prompts (runs a shell command)");
             o.put("input_inject", prefs.confirmInput() ? "prompts" : "not prompted (system mode)");
             o.put("plugin_load/plugin_invoke", prefs.confirmPlugin() ? "prompts" : "not prompted");
+            o.put("lua_exec", prefs.confirmPlugin() ? "prompts" : "not prompted");
             o.put("confirmTimeoutMs", prefs.confirmTimeoutMs());
         } catch (Throwable ignored) {
         }

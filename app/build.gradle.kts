@@ -64,4 +64,10 @@ dependencies {
     // toolchain: write smali, assemble to DEX here, hand it to plugin_load.
     implementation("org.smali:baksmali:2.5.2")
     implementation("org.smali:smali:2.5.2")
+
+    // A Lua interpreter, for injected logic that would otherwise have to be
+    // hand-written smali. Pure Java, so it dexes like anything else and rides
+    // into every scoped process on the module's own class loader - there is no
+    // compile step and no DEX to push for a script.
+    implementation("org.luaj:luaj-jse:3.0.1")
 }
