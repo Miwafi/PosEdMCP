@@ -620,7 +620,12 @@ public final class ToolRegistry {
                     callArgs.put("entry", "");
                     callArgs.put("dex_base64",
                             android.util.Base64.encodeToString(dex, android.util.Base64.NO_WRAP));
-                    JSONObject out = capabilities.appCall(pkg, "load_plugin", callArgs, 30_000L);
+                    // Into every process: an application commonly has several,
+                    // and the code you are extending may run in any of them.
+                    JSONObject out = summarizeAcrossProcesses(
+                            capabilities.appCallAll(pkg, "load_plugin", callArgs, 30_000L),
+                            "loadedIn",
+                            "The payload is loaded into every process of the package.");
                     out.put("package", pkg);
                     out.put("class", className);
                     return McpTool.json(out);
@@ -661,25 +666,40 @@ public final class ToolRegistry {
         // =================================================================
 
         add(McpTool.of("hook_method")
-                .title("Watch a method at runtime")
-                .description("Installs a hook on a method inside a running application and records"
-                        + " every call: arguments, return value, exception and thread."
+                .title("Watch or change a method at runtime")
+                .description("Installs a hook on a method inside a running application."
+                        + " By default it only records: every call's arguments, return value,"
+                        + " exception and thread. Supply any of the modification options and it"
+                        + " also changes what the application does."
                         + " \n\nThis is the dynamic half of analysis, and it needs no plugin DEX -"
                         + " the module installs the hook directly. The usual loop is: find a"
-                        + " suspicious method with dex_search or smali_disassemble, hook it here,"
-                        + " use the app, then read hook_records to see what actually flowed"
-                        + " through it."
-                        + " \n\nThe hook only observes; it does not change arguments or results."
-                        + " Use plugin_load when you need to alter behaviour. Always prompts.")
+                        + " method with dex_search or smali_disassemble, hook it here, use the app,"
+                        + " then read hook_records to see what flowed through it."
+                        + " \n\nModification options, all optional and combinable:"
+                        + " return_value makes the method produce that value and skips the original"
+                        + " entirely; set_args replaces arguments before the call; set_fields"
+                        + " assigns fields on the instance after the call. Values are parsed as"
+                        + " JSON when possible, so \"false\" is a boolean and \"42\" a number, and"
+                        + " are converted to whatever type the method actually declares."
+                        + " \n\nPrefer this over plugin_load whenever the change can be expressed"
+                        + " as a value: nothing has to be compiled, and the effect is visible in"
+                        + " hook_records as 'altered'. Always prompts.")
                 .mutating()
                 .input(props(
-                        "package", McpTool.string("Target package whose process should be watched"),
+                        "package", McpTool.string("Target package whose process should be hooked"),
                         "class", McpTool.string("Fully qualified class name, e.g. com.example.Foo"),
                         "method", McpTool.string("Method name"),
                         "params", McpTool.string("Comma-separated parameter types to pick one"
                                 + " overload, e.g. java.lang.String,int. Omit to hook every overload."),
+                        "return_value", McpTool.string("Make the method return this and skip the"
+                                + " original. Parsed as JSON when possible."),
+                        "set_args", McpTool.freeformObject("Map of argument index to new value,"
+                                + " applied before the call, e.g. {\"0\":\"hello\",\"2\":false}"),
+                        "set_fields", McpTool.freeformObject("Map of field name to new value,"
+                                + " assigned on the instance after the call, e.g. {\"mEnabled\":true}"),
+                        "observe", McpTool.type("boolean", "Keep recording calls. Default true"),
                         "max_records", McpTool.integer("Keep at most this many calls, default 200"),
-                        "reason", McpTool.string("Why you need to watch this. Shown to the user.")),
+                        "reason", McpTool.string("Why this is needed. Shown to the user.")),
                         "package", "class", "method", "reason")
                 .handler(args -> {
                     String pkg = require(args, "package");
@@ -687,10 +707,14 @@ public final class ToolRegistry {
                     String method = require(args, "method");
                     String reason = require(args, "reason");
 
+                    String effect = describeHookEffect(args);
                     requireConfirmation(ConfirmationGate.Kind.PLUGIN,
-                            "Install a runtime hook in " + pkg,
+                            effect == null
+                                    ? "Watch a method in " + pkg
+                                    : "Change behaviour in " + pkg,
                             className + "." + method
-                                    + "(" + args.optString("params", "") + ")",
+                                    + "(" + args.optString("params", "") + ")"
+                                    + (effect == null ? "" : "\n" + effect),
                             reason);
 
                     requireAppPeer(pkg);
@@ -699,7 +723,15 @@ public final class ToolRegistry {
                     call.put("method", method);
                     call.put("params", args.optString("params", ""));
                     call.put("max_records", args.optInt("max_records", 200));
-                    return McpTool.json(capabilities.appCall(pkg, "hook_method", call, 30_000L));
+                    call.put("observe", args.optBoolean("observe", true));
+                    for (String key : new String[]{"return_value", "set_args", "set_fields"}) {
+                        if (args.has(key)) {
+                            call.put(key, args.get(key));
+                        }
+                    }
+                    return McpTool.json(summarizeAcrossProcesses(
+                            capabilities.appCallAll(pkg, "hook_method", call, 30_000L),
+                            "hookedIn", "The hook is installed wherever the method runs."));
                 })
                 .build());
 
@@ -718,7 +750,32 @@ public final class ToolRegistry {
                     JSONObject call = new JSONObject();
                     call.put("subject", args.optString("subject", ""));
                     call.put("limit", args.optInt("limit", 100));
-                    return McpTool.json(capabilities.appCall(pkg, "hook_records", call, 20_000L));
+
+                    // Hooks are per-process, so every process has to be asked;
+                    // querying one of them would report an empty list while a
+                    // hook sits in a sibling.
+                    JSONArray across = capabilities.appCallAll(pkg, "hook_records", call, 20_000L);
+                    JSONArray hooks = new JSONArray();
+                    JSONArray records = new JSONArray();
+                    for (int i = 0; i < across.length(); i++) {
+                        JSONObject entry = across.optJSONObject(i);
+                        if (entry == null || !entry.optBoolean("ok", false)) {
+                            continue;
+                        }
+                        JSONObject result = entry.optJSONObject("result");
+                        if (result == null) {
+                            continue;
+                        }
+                        tag(entry.optString("process", ""), result.optJSONArray("hooks"), hooks);
+                        tag(entry.optString("process", ""), result.optJSONArray("records"), records);
+                    }
+                    JSONObject out = new JSONObject();
+                    out.put("hooks", hooks);
+                    out.put("records", records);
+                    if (hooks.length() == 0) {
+                        out.put("note", "nothing is hooked in any process of this package");
+                    }
+                    return McpTool.json(out);
                 })
                 .build());
 
@@ -748,7 +805,9 @@ public final class ToolRegistry {
                     requireAppPeer(pkg);
                     JSONObject call = new JSONObject();
                     call.put("subject", subject);
-                    return McpTool.json(capabilities.appCall(pkg, "hook_clear", call, 20_000L));
+                    return McpTool.json(summarizeAcrossProcesses(
+                            capabilities.appCallAll(pkg, "hook_clear", call, 20_000L),
+                            "clearedIn", "Every process of the package was asked."));
                 })
                 .build());
     }
@@ -988,6 +1047,91 @@ public final class ToolRegistry {
                 throw new McpTool.ToolError("unsupported action '" + action
                         + "'. Use tap, swipe, long_press, text or key.");
         }
+    }
+
+    /**
+     * Condenses a per-process fan-out into one answer.
+     *
+     * <p>Reporting a raw list of processes would leave the caller to work out
+     * whether the operation actually took, and on how many of them.
+     */
+    private static JSONObject summarizeAcrossProcesses(JSONArray results, String countKey,
+            String note) throws Exception {
+        JSONObject out = new JSONObject();
+        JSONArray detail = new JSONArray();
+        int succeeded = 0;
+        for (int i = 0; i < results.length(); i++) {
+            JSONObject entry = results.optJSONObject(i);
+            if (entry == null) {
+                continue;
+            }
+            boolean ok = entry.optBoolean("ok", false);
+            if (ok) {
+                succeeded++;
+            }
+            JSONObject row = new JSONObject();
+            row.put("process", entry.optString("process", ""));
+            row.put("ok", ok);
+            if (ok) {
+                JSONObject result = entry.optJSONObject("result");
+                if (result != null) {
+                    row.put("result", result);
+                }
+            } else {
+                row.put("error", entry.optString("error", ""));
+            }
+            detail.put(row);
+        }
+        out.put("processes", results.length());
+        out.put(countKey, succeeded);
+        if (note != null) {
+            out.put("note", note);
+        }
+        if (succeeded < results.length()) {
+            out.put("partial", true);
+        }
+        out.put("detail", detail);
+        return out;
+    }
+
+    /** Copies items into a combined list, recording which process each came from. */
+    private static void tag(String process, JSONArray from, JSONArray into) throws Exception {
+        if (from == null) {
+            return;
+        }
+        for (int i = 0; i < from.length(); i++) {
+            JSONObject item = from.optJSONObject(i);
+            if (item == null) {
+                continue;
+            }
+            item.put("process", process);
+            into.put(item);
+        }
+    }
+
+    /**
+     * Renders the modification part of a hook request for the confirmation dialog.
+     *
+     * <p>Observing needs no explanation, but changing what a method does is the
+     * kind of thing the user should see spelled out before agreeing to it.
+     *
+     * @return {@code null} when the hook only observes
+     */
+    private static String describeHookEffect(JSONObject args) {
+        List<String> parts = new ArrayList<>();
+        String returnValue = args.optString("return_value", "");
+        if (!returnValue.isEmpty()) {
+            parts.add("Always return " + returnValue + " (the original will not run)");
+        }
+        String setArgs = args.optString("set_args", "");
+        if (!setArgs.isEmpty()) {
+            parts.add("Replace arguments: " + setArgs);
+        }
+        String setFields = args.optString("set_fields", "");
+        if (!setFields.isEmpty()) {
+            parts.add("Assign fields after the call: " + setFields);
+        }
+        return parts.isEmpty() ? null : String.join("\n", parts);
     }
 
     private static String describeInputTarget(String action, JSONObject args) {

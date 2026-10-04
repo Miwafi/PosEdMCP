@@ -165,6 +165,22 @@ public final class McpTool {
         return o;
     }
 
+    /**
+     * A property whose keys and value types are the caller's to choose.
+     *
+     * <p>Used for maps like "argument index to replacement value", where the
+     * values may legitimately be strings, numbers or booleans and pinning them
+     * to one JSON type would force the model to double-encode.
+     */
+    public static JSONObject freeformObject(String description) {
+        JSONObject o = type("object", description);
+        try {
+            o.put("additionalProperties", true);
+        } catch (Throwable ignored) {
+        }
+        return o;
+    }
+
     // ---- result helpers ---------------------------------------------------
 
     /** A plain text tool result. */

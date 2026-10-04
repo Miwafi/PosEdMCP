@@ -2,6 +2,7 @@ package dev.posedmcp.ipc;
 
 import android.os.SystemClock;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
@@ -152,6 +153,36 @@ public final class BridgeServer {
 
     public boolean hasAppPeer(String pkg) {
         return !appPeerKeys(pkg).isEmpty();
+    }
+
+    /**
+     * Sends an op to every process of a package.
+     *
+     * <p>Needed for anything whose state is per-process. A hook lives in the
+     * process it was installed into, and an application commonly has several -
+     * asking only the first one that answers reports "nothing is hooked" while a
+     * hook sits in a sibling process, which is exactly the kind of answer that
+     * sends someone hunting for a bug that is not there.
+     */
+    public JSONArray requestAllProcesses(String pkg, String op, JSONObject args, long timeoutMs) {
+        JSONArray results = new JSONArray();
+        for (String key : appPeerKeys(pkg)) {
+            JSONObject entry = new JSONObject();
+            try {
+                entry.put("process", key);
+                entry.put("ok", true);
+                entry.put("result", request(key, op, args, timeoutMs));
+            } catch (Throwable t) {
+                try {
+                    entry.put("process", key);
+                    entry.put("ok", false);
+                    entry.put("error", String.valueOf(t.getMessage()));
+                } catch (Throwable ignored) {
+                }
+            }
+            results.put(entry);
+        }
+        return results;
     }
 
     /**

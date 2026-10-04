@@ -88,14 +88,16 @@ public final class AppHost {
                     args -> invokePlugin(packageName, appClassLoader, args));
             bridge.registerHandler("list_plugins", args -> listPlugins());
             bridge.registerHandler("unload_plugin", args -> unloadPlugin(args));
-            // Runtime observation: the dynamic half of static analysis. No plugin
-            // DEX involved - the module installs the hook directly, so an agent
-            // can go from a smali listing to watching real calls in one step.
+            // Runtime observation and alteration: the dynamic half of static
+            // analysis. No plugin DEX involved - the module installs the hook
+            // directly, so an agent can go from a smali listing to changing what
+            // a method does without compiling anything.
             bridge.registerHandler("hook_method", args -> HookRegistry.install(
                     args.optString("class", ""),
                     args.optString("method", ""),
                     args.optString("params", ""),
                     args.optInt("max_records", 200),
+                    args,
                     appClassLoader));
             bridge.registerHandler("hook_records", args -> HookRegistry.records(
                     args.optString("subject", ""), args.optInt("limit", 100)));

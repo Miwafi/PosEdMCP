@@ -110,9 +110,11 @@ dex_classes / dex_search 里面有什么：类、方法、字符串
    ↓
 smali_disassemble       具体怎么写的
    ↓
-hook_method             它运行时到底发生了什么（零 DEX，模块直接装观察器）
+hook_method             它运行时到底发生了什么（零 DEX，模块直接装钩子）
    ↓
-smali_assemble → plugin_load   改写它的行为（在设备上写代码，不需要 PC）
+   ├─ 改动能用「值」表达（固定返回 / 换参数 / 改字段）→ 还是 hook_method。
+   │  它是数据不是代码：不用编译，不碰 DEX，记录里标 altered 证明生效过。
+   └─ 改动是结构性的 → smali_assemble → plugin_load（在设备上写代码，不需要 PC）
 ```
 
 - 反汇编/汇编用 **baksmali/smali**，纯 Java，直接跑在 ART 上（apktool 不行，它的资源
@@ -121,7 +123,9 @@ smali_assemble → plugin_load   改写它的行为（在设备上写代码，�
 - 引擎跑在 `android:process=":dex"` 的独立进程里：大 APK 反编译吃内存，OOM 时只死这个
   进程，MCP 端点和你正在看的确认弹窗不受影响
 - 大输出一律落盘、返回路径与统计数字；只有单个小类才内联
-- `hook_method` 只观察（参数、返回值、异常、线程），不改行为；要改行为用 `plugin_load`
+- **hook 是每进程状态**，所以 `hook_method` / `hook_clear` / `plugin_load` 会作用于该包
+  的**所有**进程，`hook_records` 合并各进程结果并标注来源。一个应用常有多个进程，
+  只问其中一个会得到"没有 hook"这种误导性答案
 
 ## 架构
 

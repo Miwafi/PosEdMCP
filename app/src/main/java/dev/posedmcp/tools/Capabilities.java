@@ -149,6 +149,15 @@ public final class Capabilities {
         return bridge.requestAnyProcess(pkg, op, args, timeoutMs);
     }
 
+    /** Every process of a package, for state that is per-process such as hooks. */
+    public org.json.JSONArray appCallAll(String pkg, String op, JSONObject args, long timeoutMs)
+            throws IOException {
+        if (bridge == null) {
+            throw new IOException("bridge is not running");
+        }
+        return bridge.requestAllProcesses(pkg, op, args, timeoutMs);
+    }
+
     // ---- root shell -------------------------------------------------------
 
     /** A root shell command that already has the user's approval. */

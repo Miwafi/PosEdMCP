@@ -53,18 +53,39 @@
   `smali_assemble` 出 DEX、再把路径交给 `plugin_load` 的 `dex_path`。
 - `hook_records` — 读运行时观察结果。
 
-## 运行时观察（弹窗确认）
+## 运行时观察与修改（弹窗确认）
 
-- `hook_method` — 在目标进程里挂观察器，记录每次调用的参数、返回值、异常和线程。
-  **不需要写任何 DEX**。`params` 传参类型可以指定重载；不传则所有重载都挂。
-- `hook_clear` — 摘掉 hook。读完就摘，被观察的应用不该一直为没人看的记录买单。
+- `hook_method` — 在目标进程里挂钩子。默认只观察：记录每次调用的参数、返回值、异常、线程。
+  **不需要写任何 DEX。** `params` 传参类型可以指定重载；不传则所有重载都挂。
+  三个可选的修改项，可组合：
+  - `return_value` — 让方法固定返回这个值，**原方法不会执行**
+  - `set_args` — 调用前替换参数，如 `{"0":"新值","2":false}`
+  - `set_fields` — 调用后给实例字段赋值，如 `{"mEnabled":true}`
+
+  值的写法：能解析成 JSON 就按 JSON 解析（`"false"` → 布尔、`"42"` → 数字），
+  否则按字面字符串。**带空格的普通字符串按字面处理**，不会被截断。
+
+  > 优先用它，而不是 `plugin_load`：能用一个值表达的改动就不需要编译任何东西，
+  > 而且 `hook_records` 里会标 `altered: true`，看得见生效过。
+
+- `hook_clear` — 摘掉 hook。读完、验证完就摘——被观察/修改的应用不该一直为此买单。
+  不传 `subject` 则摘掉该应用所有进程里的全部 hook。
+
+**注意**：hook 是**每进程**状态。一个应用常有多个进程（时钟就有主进程和 `:clockWidget`），
+这些工具会自动作用于该包**所有**进程，`hook_records` 也会合并各进程的结果并标注来源。
+
+- `hook_records` — 读运行时结果：已安装的 hook（含它做什么）与最近捕获的调用。只读，不弹窗。
 
 ### 推荐的逆向节奏
 
 1. `apk_info` 看清单，`dex_search` / `dex_classes` 定位可疑的类或字符串
 2. `smali_disassemble` 只反汇编你关心的那几个类（**一定加 filter**，否则产物是几 MB）
-3. 需要看运行时的真实数据 → `hook_method`，操作应用，`hook_records` 读回来
-4. 需要改行为 → 写 smali，`smali_assemble` 出 DEX，`plugin_load(dex_path=...)` 注入
+3. 需要看运行时的真实数据 → `hook_method`（只观察），操作应用，`hook_records` 读回来
+4. 改动能用**值**表达（固定返回、换参数、改字段）→ 还是 `hook_method`，加
+   `return_value` / `set_args` / `set_fields`。**不要为此写代码。**
+5. 改动是**结构性**的（改控制流、加分支、调新 API）→ 写 smali，`smali_assemble` 出 DEX，
+   `plugin_load(dex_path=...)` 注入
+6. 完事把 hook 摘掉（`hook_clear`），除非用户要求留着
 
 `smali_assemble` 单独调用不会弹窗（只是写文件），弹窗发生在 `plugin_load`——
 执行才是边界。
