@@ -1,0 +1,14 @@
+.gradle/
+.gradle-home/
+.tools/
+local.properties
+build/
+app/build/
+tools/plugin-demo/build/
+*.iml
+.idea/
+*.log
+
+# Screenshots are taken on-device and can capture whatever is on screen,
+# including the MCP token shown in this app's own UI. Keep them out of the tree.
+docs/*.png

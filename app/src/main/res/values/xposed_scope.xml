@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Scope requested by default when the module is first enabled.
+
+      "android" is the package name LSPosed reports for system_server, and is
+      what gives access to system-level context. Additional third-party
+      packages can be ticked in LSPosed Manager at any time; the app lists the
+      ones it currently sees under "Module status".
+    -->
+    <string-array name="xposedscope" translatable="false">
+        <item>android</item>
+        <item>com.android.systemui</item>
+    </string-array>
+</resources>

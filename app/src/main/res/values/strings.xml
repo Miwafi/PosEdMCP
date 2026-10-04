@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">PosEdMCP</string>
+    <string name="xposed_description">Root-backed MCP server for on-device agents: confirmed shell execution, screen capture, input injection and dynamic code injection into scoped apps.</string>
+</resources>

@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!--
+      Without this, the platform freezes the process once the app is no longer
+      on screen, and a frozen process stops accepting connections: the MCP
+      endpoint goes silent with no error anywhere. ColourOS in particular freezes
+      within seconds.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
+    <application
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:description="@string/xposed_description"
+        android:icon="@drawable/ic_launcher"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
+        android:largeHeap="true"
+        tools:ignore="AllowBackup">
+
+        <!-- Classic Xposed module declaration. LSPosed reads these plus
+             assets/xposed_init, which names the entry class. -->
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="@string/xposed_description" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="93" />
+        <!--
+          Required for XSharedPreferences to work: it tells the framework to
+          grant its daemon access to this app's shared_prefs directory. The
+          module runs inside other applications' processes and has no other way
+          to read the bridge credentials (Android 16 moved the real preferences
+          to a directory no other uid can read).
+        -->
+        <meta-data
+            android:name="xposedsharedprefs"
+            android:value="true" />
+        <meta-data
+            android:name="xposedscope"
+            android:resource="@array/xposedscope" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:excludeFromRecents="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <!-- Legacy Xposed/LSPosed manager entry point. -->
+                <action android:name="de.robv.android.xposed.category.MODULE_SETTINGS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".McpService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Local Model Context Protocol server for device automation" />
+        </service>
+
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".root.ConfirmActionReceiver"
+            android:exported="false" />
+
+        <!--
+          The two ways a hooked process can ask this app for the bridge
+          credentials. They run under other applications' uids and have no
+          privileged route to this app: abstract sockets are refused by SELinux
+          between two untrusted_app domains, and the app's own files are not
+          readable by other uids. The service is what works; the provider is a
+          fallback for callers that can see this package. See the class comments
+          for what these do and do not protect.
+        -->
+        <service
+            android:name=".ipc.BridgeTokenService"
+            android:exported="true" />
+
+        <!--
+          The analysis engines live in their own process. Parsing a large APK is
+          memory-hungry and can fail in ways nothing can catch, and this app is
+          also the one holding the MCP endpoint and drawing the approval dialog.
+          Keeping them apart means a decompiler that dies costs a retry, not the
+          whole server.
+        -->
+        <service
+            android:name=".dex.DexService"
+            android:exported="false"
+            android:process=":dex" />
+
+        <provider
+            android:name=".ipc.BridgeTokenProvider"
+            android:authorities="dev.posedmcp.bridge"
+            android:exported="true"
+            android:grantUriPermissions="false" />
+    </application>
+</manifest>
