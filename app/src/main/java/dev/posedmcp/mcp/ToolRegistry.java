@@ -164,6 +164,38 @@ public final class ToolRegistry {
                 })
                 .build());
 
+        add(McpTool.of("launch_app")
+                .title("Bring an app to the foreground")
+                .description("Starts an app's main activity, the same as tapping its icon."
+                        + " Needs no root: this app holds the overlay permission, which is what"
+                        + " lets a background process start an activity. Pair it with ui_dump and"
+                        + " input_inject to drive an app's interface."
+                        + " \n\nUse list_packages to find the package name.")
+                .mutating()
+                .input(props("package", McpTool.string("Package name, e.g. com.github.android")),
+                        "package")
+                .handler(args -> {
+                    String pkg = require(args, "package");
+                    android.content.Intent intent =
+                            context.getPackageManager().getLaunchIntentForPackage(pkg);
+                    if (intent == null) {
+                        throw new McpTool.ToolError(pkg + " has no launchable activity"
+                                + " (it may be a service-only package)");
+                    }
+                    intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                            | android.content.Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+                    try {
+                        context.startActivity(intent);
+                    } catch (Throwable t) {
+                        throw new McpTool.ToolError("could not start " + pkg + ": " + t);
+                    }
+                    JSONObject out = new JSONObject();
+                    out.put("launched", pkg);
+                    out.put("note", "Give it a moment, then ui_dump to see where it landed.");
+                    return McpTool.json(out);
+                })
+                .build());
+
         add(McpTool.of("events_poll")
                 .title("Poll device events")
                 .description("Reads the event feed pushed by the module: foreground activity"
