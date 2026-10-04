@@ -71,6 +71,15 @@
 - `hook_clear` — 摘掉 hook。读完、验证完就摘——被观察/修改的应用不该一直为此买单。
   不传 `subject` 则摘掉该应用所有进程里的全部 hook。
 
+- `invoke_method` — 在目标应用进程里**反射调用任意方法**，用的是它自己的 ClassLoader
+  和权限，所以私有、未导出的方法也够得到。这是注入的另一半：`hook_method` 拦它发出的
+  调用，`invoke_method` 以它的身份发出调用。
+  - 静态方法：给 `class` + `method`
+  - 实例方法：再加 `instance_class` +（`instance_field` 静态字段，或
+    `instance_method` 静态无参访问器）来拿到接收者
+  - `args` 是 JSON 数组，会按形参类型转换
+  - **不需要写任何代码、不需要 DEX**——这是它相对 `plugin_load` 的价值
+
 **注意**：hook 是**每进程**状态。一个应用常有多个进程（时钟就有主进程和 `:clockWidget`），
 这些工具会自动作用于该包**所有**进程，`hook_records` 也会合并各进程的结果并标注来源。
 
@@ -83,9 +92,12 @@
 3. 需要看运行时的真实数据 → `hook_method`（只观察），操作应用，`hook_records` 读回来
 4. 改动能用**值**表达（固定返回、换参数、改字段）→ 还是 `hook_method`，加
    `return_value` / `set_args` / `set_fields`。**不要为此写代码。**
-5. 改动是**结构性**的（改控制流、加分支、调新 API）→ 写 smali，`smali_assemble` 出 DEX，
-   `plugin_load(dex_path=...)` 注入
-6. 完事把 hook 摘掉（`hook_clear`），除非用户要求留着
+5. 要**调用**目标应用已有的某个方法 → `invoke_method`。同样不需要写代码。
+   先 `dex_search` / `smali_disassemble` 找到类和方法，再想清楚怎么拿到接收者
+   （通常是某个单例的静态字段或静态访问器）。
+6. 改动是**结构性**的（改控制流、加分支、写新逻辑、连续调好几个 API）→ 写 smali，
+   `smali_assemble` 出 DEX，`plugin_load(dex_path=...)` 注入
+7. 完事把 hook 摘掉（`hook_clear`），除非用户要求留着
 
 `smali_assemble` 单独调用不会弹窗（只是写文件），弹窗发生在 `plugin_load`——
 执行才是边界。

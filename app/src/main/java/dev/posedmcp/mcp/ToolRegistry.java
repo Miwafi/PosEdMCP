@@ -931,6 +931,81 @@ public final class ToolRegistry {
                             "clearedIn", "Every process of the package was asked."));
                 })
                 .build());
+
+        add(McpTool.of("invoke_method")
+                .title("Call a method inside another app")
+                .description("Calls a method inside a target app's process, as that app: with its"
+                        + " class loader and its privileges. Private and unexported methods are"
+                        + " reachable, which is the point - this drives an app through its own API"
+                        + " rather than tapping its interface."
+                        + " \n\nStatic method: name class + method. Instance method: also say how to"
+                        + " get the receiver - instance_class plus either instance_field (a static"
+                        + " field, typically a singleton) or instance_method (a static no-argument"
+                        + " accessor)."
+                        + " \n\nArguments are coerced to the declared parameter types, so \"false\""
+                        + " arrives as a boolean and \"42\" as a number. Nothing is compiled or"
+                        + " loaded: the call happens directly, so it needs no DEX."
+                        + " \n\nFind the class and method with dex_search and smali_disassemble"
+                        + " first. Always prompts.")
+                .mutating()
+                .input(props(
+                        "package", McpTool.string("Target package whose process should make the call"),
+                        "class", McpTool.string("Fully qualified class name"),
+                        "method", McpTool.string("Method name"),
+                        "params", McpTool.string("Comma-separated parameter types, needed only to"
+                                + " choose between overloads"),
+                        "args", McpTool.array("object", "Arguments as a JSON array,"
+                                + " e.g. [\"rikkahub\",\"rikkahub\"]"),
+                        "instance_class", McpTool.string("For instance methods: the class holding the"
+                                + " receiver, often a singleton holder"),
+                        "instance_field", McpTool.string("...its static field holding the receiver,"
+                                + " e.g. INSTANCE"),
+                        "instance_method", McpTool.string("...or a static no-argument method"
+                                + " returning it, e.g. getInstance"),
+                        "reason", McpTool.string("Why this call is needed. Shown to the user.")),
+                        "package", "class", "method", "reason")
+                .handler(args -> {
+                    String pkg = require(args, "package");
+                    String className = require(args, "class");
+                    String method = require(args, "method");
+                    String reason = require(args, "reason");
+                    String params = args.optString("params", "");
+                    String instanceClass = args.optString("instance_class", "");
+                    String instanceField = args.optString("instance_field", "");
+                    String instanceMethod = args.optString("instance_method", "");
+
+                    StringBuilder detail = new StringBuilder();
+                    detail.append(className).append('.').append(method)
+                            .append('(').append(params).append(')');
+                    if (args.has("args")) {
+                        detail.append("\narguments: ").append(args.get("args"));
+                    }
+                    if (!instanceClass.isEmpty()) {
+                        detail.append("\nreceiver: ").append(instanceClass);
+                        if (!instanceField.isEmpty()) {
+                            detail.append('.').append(instanceField);
+                        } else if (!instanceMethod.isEmpty()) {
+                            detail.append('.').append(instanceMethod).append("()");
+                        }
+                    }
+
+                    requireConfirmation(ConfirmationGate.Kind.PLUGIN,
+                            "Call into " + pkg + " through its own API", detail.toString(), reason);
+
+                    requireAppPeer(pkg);
+                    JSONObject call = new JSONObject();
+                    call.put("class", className);
+                    call.put("method", method);
+                    call.put("params", params);
+                    if (args.has("args")) {
+                        call.put("args", args.opt("args"));
+                    }
+                    call.put("instance_class", instanceClass);
+                    call.put("instance_field", instanceField);
+                    call.put("instance_method", instanceMethod);
+                    return McpTool.json(capabilities.appCall(pkg, "invoke_method", call, 60_000L));
+                })
+                .build());
     }
 
     // =====================================================================

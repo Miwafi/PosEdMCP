@@ -127,7 +127,7 @@ POSEDMCP_TOKEN=<token> ./tools/mcp-call.sh '{"jsonrpc":"2.0","id":1,"method":"to
 `smali_assemble`、`hook_records`。
 
 需要确认：`root_shell_exec`、`screen_capture`、`ui_dump`、`input_inject`、`plugin_load`、
-`plugin_invoke`、`hook_method`、`hook_clear`。
+`plugin_invoke`、`hook_method`、`hook_clear`、`invoke_method`。
 
 不确认但会改状态的只有一个：`launch_app`——把某个应用切到前台，等同于点它的图标。
 放在这里说是因为它不弹窗，而它确实会改变你屏幕上的东西。

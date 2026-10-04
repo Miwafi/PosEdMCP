@@ -103,6 +103,18 @@ public final class AppHost {
                     args.optString("subject", ""), args.optInt("limit", 100)));
             bridge.registerHandler("hook_clear", args -> HookRegistry.clear(
                     args.optString("subject", "")));
+            // The other half of injection: make a call as the application, with
+            // its class loader and its privileges, so private and unexported
+            // methods are reachable without a plugin DEX.
+            bridge.registerHandler("invoke_method", args -> MethodInvoker.invoke(
+                    args.optString("class", ""),
+                    args.optString("method", ""),
+                    args.optString("params", ""),
+                    args.optJSONArray("args"),
+                    args.optString("instance_class", ""),
+                    args.optString("instance_field", ""),
+                    args.optString("instance_method", ""),
+                    appClassLoader));
             bridge.registerHandler("ping", args -> new JSONObject().put("pong", true)
                     .put("hooks", HookRegistry.snapshot().size()));
             bridge.start();

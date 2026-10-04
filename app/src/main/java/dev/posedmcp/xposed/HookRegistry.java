@@ -565,7 +565,8 @@ public final class HookRegistry {
         }
     }
 
-    private static Class<?> resolveType(ClassLoader loader, String token) throws Exception {
+    /** Shared with {@link MethodInvoker}, which resolves the same type names. */
+    static Class<?> resolveType(ClassLoader loader, String token) throws Exception {
         switch (token) {
             case "int": return int.class;
             case "long": return long.class;
