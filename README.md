@@ -170,7 +170,7 @@ hook_method             它运行时到底发生了什么（零 DEX，模块直�
 │  McpService (前台服务)                                  │
 │    ├── HttpTransport  127.0.0.1:8765  /mcp              │
 │    ├── McpServer      JSON-RPC, 工具分发                │
-│    ├── ToolRegistry   12 个工具 + 确认策略               │
+│    ├── ToolRegistry   23 个工具 + 确认策略               │
 │    ├── ConfirmationGate ──> ConfirmOverlay (应用浮层)   │
 │    ├── BridgeServer   127.0.0.1:8766  (进程间桥)         │
 │    ├── RootShell      su, 管道 stdio（非 pty）           │
