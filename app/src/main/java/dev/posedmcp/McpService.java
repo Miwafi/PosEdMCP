@@ -15,6 +15,7 @@ import android.os.SystemClock;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import dev.posedmcp.a11y.AccessibilityBridge;
 import dev.posedmcp.ipc.BridgeCredentials;
 import dev.posedmcp.ipc.BridgeServer;
 import dev.posedmcp.mcp.McpServer;
@@ -115,6 +116,10 @@ public final class McpService extends Service {
         }
         try {
             events = new EventStore();
+            // Window transitions come from the accessibility service, which runs
+            // in this process, so they can go straight into the feed.
+            AccessibilityBridge.setEventSink((type, data) ->
+                    events.add("a11y", type, data, System.currentTimeMillis()));
             bridge = new BridgeServer(prefs.bridgePort(), prefs.bridgeToken(), events,
                     this::trustPeer);
             bridge.start();
@@ -152,6 +157,7 @@ public final class McpService extends Service {
         }
         mcp = null;
         bridge = null;
+        AccessibilityBridge.setEventSink(null);
         Logx.i("service stopped");
     }
 

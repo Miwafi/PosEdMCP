@@ -21,6 +21,7 @@ import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import dev.posedmcp.a11y.AccessibilityBridge;
 import dev.posedmcp.ipc.BridgeCredentials;
 import dev.posedmcp.state.Prefs;
 
@@ -88,12 +89,19 @@ public class MainActivity extends Activity {
                 Settings.canDrawOverlays(this) ? "granted" : "NOT granted"));
         content.addView(keyValue("Battery",
                 isBatteryExempt() ? "unrestricted" : "OPTIMISED - the service will freeze"));
+        content.addView(keyValue("Accessibility",
+                AccessibilityBridge.isConnected() ? "enabled" : "NOT enabled"));
+        if (!AccessibilityBridge.isConnected()) {
+            content.addView(muted("Accessibility is what keeps this app running: an application"
+                    + " hosting an enabled accessibility service holds a system binding, so it is"
+                    + " not frozen once it leaves the screen. Without it the MCP endpoint goes"
+                    + " silent exactly when an agent in another app tries to use it. It is also"
+                    + " what provides screen capture, gestures and the view tree without root."));
+        }
         if (!isBatteryExempt()) {
-            content.addView(muted("While the app is not on screen the platform freezes its"
-                    + " process, and a frozen process accepts no connections at all - the MCP"
-                    + " endpoint simply stops answering, with nothing in any log. Grant"
-                    + " unrestricted battery use, and on ColorOS also allow background activity"
-                    + " for PosEdMCP in the battery settings."));
+            content.addView(muted("Battery optimisation also freezes the process in the"
+                    + " background. Grant unrestricted battery use, and on ColorOS also allow"
+                    + " background activity for PosEdMCP in the battery settings."));
         }
         content.addView(muted("Without the overlay permission, approval prompts fall back to a"
                 + " notification. If that also fails, privileged calls are refused."));
@@ -142,6 +150,14 @@ public class MainActivity extends Activity {
             }
         }));
         serviceRow.addView(button("Battery settings", v -> openBatterySettings()));
+        serviceRow.addView(button("Accessibility", v -> {
+            try {
+                startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                toast("Turn on PosEdMCP in the list");
+            } catch (Throwable t) {
+                toast("Could not open accessibility settings");
+            }
+        }));
         content.addView(serviceRow);
 
         // ---- confirmation policy -----------------------------------------

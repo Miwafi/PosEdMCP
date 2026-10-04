@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Accessibility is doing two jobs here.
+
+  One is capability: it is the only supported way to capture the screen, inject
+  gestures and read the view tree without root, and on Android 16 the
+  system_server route for screenshots no longer exists at all.
+
+  The other is liveness. An application hosting an enabled accessibility service
+  holds a binding from the system, so it stays resident instead of being frozen
+  once it leaves the screen - which is precisely when an on-device agent needs
+  the MCP endpoint to still be answering.
+
+  The event types are deliberately narrow: window transitions are what makes a
+  useful event feed, and subscribing to everything would generate traffic for
+  no benefit.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeWindowsChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews"
+    android:canRetrieveWindowContent="true"
+    android:canPerformGestures="true"
+    android:canTakeScreenshot="true"
+    android:notificationTimeout="120"
+    android:description="@string/accessibility_description" />

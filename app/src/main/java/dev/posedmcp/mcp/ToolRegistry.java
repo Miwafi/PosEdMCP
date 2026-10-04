@@ -24,6 +24,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
+import dev.posedmcp.Logx;
+import dev.posedmcp.a11y.AccessibilityBridge;
 import dev.posedmcp.dex.ApkInfo;
 import dev.posedmcp.dex.DexClient;
 import dev.posedmcp.ipc.BridgeServer;
@@ -412,15 +414,18 @@ public final class ToolRegistry {
 
         add(McpTool.of("screen_capture")
                 .title("Capture the screen")
-                .description("Takes a screenshot. mode=system uses the module inside system_server"
-                        + " (no shell, prompts as a screen-capture request); mode=root runs"
-                        + " 'screencap' as root (prompts as a root shell command, always)."
-                        + " mode=auto picks system when the bridge is connected."
-                        + " The image is downscaled by default so it stays cheap to look at.")
+                .description("Takes a screenshot. Route preference in mode=auto is accessibility,"
+                        + " then system_server, then the root shell - accessibility first because"
+                        + " it needs no root and is the only one of the three that still exists on"
+                        + " Android 16."
+                        + " \n\nmode=a11y captures through the accessibility service; mode=system"
+                        + " uses the module inside system_server; mode=root runs 'screencap' as root,"
+                        + " which always prompts as a root shell command."
+                        + " \n\nThe image is downscaled by default so it stays cheap to look at.")
                 .mutating()
                 .input(props(
                         "mode", enumOf("Which capture path to use. Default auto",
-                                "auto", "system", "root"),
+                                "auto", "a11y", "system", "root"),
                         "format", enumOf("Image format. Default png", "png", "jpeg"),
                         "max_dimension", McpTool.integer("Longest edge in pixels after scaling, default 1024. 0 keeps full size"),
                         "quality", McpTool.integer("JPEG quality 1-100, default 80"),
@@ -433,13 +438,39 @@ public final class ToolRegistry {
                     int maxDim = args.optInt("max_dimension", 1024);
                     int quality = Math.max(1, Math.min(args.optInt("quality", 80), 100));
 
-                    boolean useSystem = Capabilities.MODE_SYSTEM.equals(mode)
-                            || (Capabilities.MODE_AUTO.equals(mode)
-                                    && capabilities.systemScreenshotUsable());
+                    // Route preference: accessibility, then system_server, then the
+                    // shell. Accessibility is first because it needs no root and is
+                    // the only one of the three Android 16 still offers.
+                    boolean allowFallback = !Capabilities.MODE_A11Y.equals(mode)
+                            && !Capabilities.MODE_SYSTEM.equals(mode)
+                            && !Capabilities.MODE_ROOT.equals(mode);
+                    boolean tryA11y = Capabilities.MODE_A11Y.equals(mode)
+                            || (allowFallback && Capabilities.accessibilityOnline());
+                    boolean trySystem = !tryA11y && (Capabilities.MODE_SYSTEM.equals(mode)
+                            || (allowFallback && capabilities.systemScreenshotUsable()));
 
+                    android.graphics.Bitmap shot = null;
                     byte[] raw = null;
-                    String route = Capabilities.MODE_SYSTEM;
-                    if (useSystem) {
+                    String route = null;
+
+                    if (tryA11y) {
+                        requireConfirmation(ConfirmationGate.Kind.SCREEN,
+                                "Capture the screen contents",
+                                "Take a screenshot through the accessibility service and hand it to "
+                                        + requester() + ".", reason);
+                        try {
+                            shot = Capabilities.accessibilityScreenshot();
+                            route = Capabilities.MODE_A11Y;
+                        } catch (IOException e) {
+                            if (!allowFallback) {
+                                throw new McpTool.ToolError("the accessibility route failed: "
+                                        + e.getMessage());
+                            }
+                            Logx.w("accessibility screenshot failed, falling back: " + e.getMessage());
+                        }
+                    }
+
+                    if (shot == null && raw == null && trySystem) {
                         requireSystemBridge("screen_capture");
                         requireConfirmation(ConfirmationGate.Kind.SCREEN,
                                 "Capture the screen contents",
@@ -447,21 +478,18 @@ public final class ToolRegistry {
                                         + requester() + ".", reason);
                         try {
                             raw = capabilities.systemScreenshot();
+                            route = Capabilities.MODE_SYSTEM;
                         } catch (Exception e) {
-                            // The platform route exists but did not deliver. Fall
-                            // through to the shell rather than failing the call,
-                            // and stop offering the system route this run.
                             capabilities.markSystemScreenshotBroken(String.valueOf(e.getMessage()));
-                            if (Capabilities.MODE_SYSTEM.equals(mode)) {
-                                throw new McpTool.ToolError(
-                                        "the system screenshot route failed: " + e.getMessage()
-                                        + ". Use mode=root, or mode=auto to fall back"
-                                        + " automatically.");
+                            if (!allowFallback) {
+                                throw new McpTool.ToolError("the system screenshot route failed: "
+                                        + e.getMessage() + ". Use mode=root, or mode=auto to"
+                                        + " fall back automatically.");
                             }
                         }
                     }
 
-                    if (raw == null) {
+                    if (shot == null && raw == null) {
                         route = Capabilities.MODE_ROOT;
                         requireConfirmation(ConfirmationGate.Kind.SHELL, "Root shell command",
                                 "screencap -p", reason);
@@ -475,25 +503,58 @@ public final class ToolRegistry {
                     JSONObject out = new JSONObject();
                     out.put("route", route);
                     out.put("format", format);
-                    out.put("imageBase64", Capabilities.encodeImage(raw, format, maxDim, quality));
+                    out.put("imageBase64", shot != null
+                            ? Capabilities.encodeImage(shot, format, maxDim, quality)
+                            : Capabilities.encodeImage(raw, format, maxDim, quality));
                     return McpTool.json(out);
                 })
                 .build());
 
         add(McpTool.of("ui_dump")
                 .title("Dump the UI hierarchy")
-                .description("Dumps the accessibility node tree of the current screen as JSON:"
-                        + " text, content descriptions, resource ids, bounds and clickability."
+                .description("Dumps the control tree of the current screen as JSON: text, content"
+                        + " descriptions, resource ids, bounds and clickability."
                         + " Far cheaper than a screenshot for locating a control to tap."
-                        + " Implemented with 'uiautomator', so it prompts as a root shell command.")
+                        + " \n\nmode=a11y reads it through the accessibility service, which needs no"
+                        + " root; mode=root runs 'uiautomator' as root, which prompts as a root"
+                        + " shell command every time. mode=auto prefers accessibility.")
                 .mutating()
                 .input(props(
                         "reason", McpTool.string("Why you need the UI tree. Shown to the user."),
+                        "mode", enumOf("Which route to use. Default auto",
+                                "auto", "a11y", "root"),
+                        "max_nodes", McpTool.integer("Stop after this many nodes, default 300"),
                         "simplify", McpTool.type("boolean", "Drop uninteresting nodes. Default true")),
                         "reason")
                 .handler(args -> {
                     String reason = require(args, "reason");
                     boolean simplify = args.optBoolean("simplify", true);
+                    int maxNodes = args.optInt("max_nodes", 300);
+                    String mode = normalizeMode(args.optString("mode", Capabilities.MODE_AUTO));
+
+                    boolean allowFallback = !Capabilities.MODE_A11Y.equals(mode)
+                            && !Capabilities.MODE_ROOT.equals(mode);
+                    boolean tryA11y = Capabilities.MODE_A11Y.equals(mode)
+                            || (allowFallback && Capabilities.accessibilityOnline());
+
+                    if (tryA11y) {
+                        requireConfirmation(ConfirmationGate.Kind.SCREEN, "Read the current screen",
+                                "Read the controls on screen and hand the tree to " + requester()
+                                        + ".", reason);
+                        try {
+                            return McpTool.json(
+                                    AccessibilityBridge.activeWindowTree(maxNodes, simplify));
+                        } catch (IOException e) {
+                            if (!allowFallback) {
+                                throw new McpTool.ToolError("the accessibility route failed: "
+                                        + e.getMessage());
+                            }
+                            Logx.w("accessibility ui dump failed, falling back: " + e.getMessage());
+                        }
+                    }
+
+                    // The shell route needs a root command for every dump, which is
+                    // why it is the fallback rather than the default.
                     String path = "/data/local/tmp/posedmcp_ui.xml";
                     String command = "uiautomator dump --compressed " + shellQuote(path)
                             + " >/dev/null 2>&1; cat " + shellQuote(path);
@@ -520,10 +581,16 @@ public final class ToolRegistry {
         add(McpTool.of("input_inject")
                 .title("Inject input events")
                 .description("Sends synthetic touch, swipe, text or key events to the device."
-                        + " mode=system injects through the module inside system_server (prompts as"
-                        + " an input request); mode=root runs the 'input' command as root (prompts"
-                        + " as a root shell command, always). mode=auto prefers system."
-                        + " Get coordinates from ui_dump or screen_capture first.")
+                        + " Route preference in mode=auto is accessibility, then system_server,"
+                        + " then root."
+                        + " \n\nmode=a11y uses the accessibility service: real gestures, and text"
+                        + " through ACTION_SET_TEXT on the focused field. It needs no root and"
+                        + " keeps working while another app is in front. Keys it cannot express"
+                        + " (volume, media) automatically fall through to another route."
+                        + " mode=system injects through the module inside system_server;"
+                        + " mode=root runs the 'input' command as root, which always prompts as a"
+                        + " root shell command."
+                        + " \n\nGet coordinates from ui_dump or screen_capture first.")
                 .mutating()
                 .input(props(
                         "action", enumOf("The gesture or event to send",
@@ -535,8 +602,8 @@ public final class ToolRegistry {
                         "duration_ms", McpTool.integer("Swipe/long-press duration, default 300"),
                         "text", McpTool.string("Text to type for action=text"),
                         "keycode", McpTool.string("Key name or code for action=key, e.g. HOME, BACK, 3"),
-                        "mode", enumOf("Which injection path to use",
-                                "auto", "system", "root"),
+                        "mode", enumOf("Which injection path to use. Default auto",
+                                "auto", "a11y", "system", "root"),
                         "reason", McpTool.string("Why this input is needed. Shown to the user.")),
                         "action", "reason")
                 .handler(args -> {
@@ -544,32 +611,54 @@ public final class ToolRegistry {
                     String reason = require(args, "reason");
                     String mode = normalizeMode(args.optString("mode", Capabilities.MODE_AUTO));
 
+                    boolean allowFallback = !Capabilities.MODE_A11Y.equals(mode)
+                            && !Capabilities.MODE_SYSTEM.equals(mode)
+                            && !Capabilities.MODE_ROOT.equals(mode);
+                    boolean tryA11y = Capabilities.MODE_A11Y.equals(mode)
+                            || (allowFallback && Capabilities.accessibilityOnline());
+
+                    if (tryA11y) {
+                        try {
+                            return McpTool.json(accessibilityInput(action, args, reason));
+                        } catch (McpTool.ToolError e) {
+                            throw e;
+                        } catch (IOException e) {
+                            if (!allowFallback) {
+                                throw new McpTool.ToolError(e.getMessage());
+                            }
+                            // Some keys have no accessibility equivalent, so this
+                            // is a normal outcome rather than a failure.
+                            Logx.w("accessibility input unavailable, falling back: " + e.getMessage());
+                        }
+                    }
+
                     JSONObject payload = new JSONObject(args.toString());
                     payload.remove("reason");
                     payload.remove("mode");
 
-                    if (Capabilities.MODE_ROOT.equals(mode)
-                            || (Capabilities.MODE_AUTO.equals(mode) && !capabilities.systemOnline())) {
-                        String command = buildInputCommand(action, args);
-                        requireConfirmation(ConfirmationGate.Kind.SHELL, "Root shell command",
-                                command, reason);
-                        RootShell.Result result = capabilities.confirmedShell(command, 20_000L);
-                        JSONObject out = new JSONObject();
-                        out.put("route", Capabilities.MODE_ROOT);
-                        out.put("command", command);
-                        out.put("exitCode", result.exitCode);
-                        if (!result.stderr.isEmpty()) {
-                            out.put("stderr", result.stderr);
-                        }
+                    boolean trySystem = !Capabilities.MODE_ROOT.equals(mode)
+                            && (Capabilities.MODE_SYSTEM.equals(mode) || capabilities.systemOnline());
+                    if (trySystem) {
+                        requireSystemBridge("input_inject");
+                        requireConfirmation(ConfirmationGate.Kind.INPUT, "Inject input into the device",
+                                "Send " + action + " " + describeInputTarget(action, args) + " to "
+                                        + "the foreground app as " + requester() + ".", reason);
+                        JSONObject out = capabilities.systemInput(payload);
+                        out.put("route", Capabilities.MODE_SYSTEM);
                         return McpTool.json(out);
                     }
 
-                    requireSystemBridge("input_inject");
-                    requireConfirmation(ConfirmationGate.Kind.INPUT, "Inject input into the device",
-                            "Send " + action + " " + describeInputTarget(action, args) + " to "
-                                    + "the foreground app as " + requester() + ".", reason);
-                    JSONObject out = capabilities.systemInput(payload);
-                    out.put("route", Capabilities.MODE_SYSTEM);
+                    String command = buildInputCommand(action, args);
+                    requireConfirmation(ConfirmationGate.Kind.SHELL, "Root shell command",
+                            command, reason);
+                    RootShell.Result result = capabilities.confirmedShell(command, 20_000L);
+                    JSONObject out = new JSONObject();
+                    out.put("route", Capabilities.MODE_ROOT);
+                    out.put("command", command);
+                    out.put("exitCode", result.exitCode);
+                    if (!result.stderr.isEmpty()) {
+                        out.put("stderr", result.stderr);
+                    }
                     return McpTool.json(out);
                 })
                 .build());
@@ -856,6 +945,13 @@ public final class ToolRegistry {
             out.put("bridgePeers", peers);
             out.put("bridgePort", bridge.port());
             out.put("mcpPort", prefs.mcpPort());
+            out.put("accessibility", AccessibilityBridge.describe());
+            if (!AccessibilityBridge.isConnected()) {
+                out.put("accessibilityHint",
+                        "Without the accessibility service the platform freezes this app once it"
+                                + " leaves the screen, so the MCP endpoint stops answering exactly"
+                                + " when an agent in another app needs it.");
+            }
             out.put("confirmations", confirmationsJson());
             if (capabilities.systemOnline()) {
                 try {
@@ -1014,7 +1110,8 @@ public final class ToolRegistry {
 
     private static String normalizeMode(String mode) {
         String m = mode == null ? "" : mode.toLowerCase(Locale.ROOT);
-        if (Capabilities.MODE_SYSTEM.equals(m) || Capabilities.MODE_ROOT.equals(m)) {
+        if (Capabilities.MODE_SYSTEM.equals(m) || Capabilities.MODE_ROOT.equals(m)
+                || Capabilities.MODE_A11Y.equals(m)) {
             return m;
         }
         return Capabilities.MODE_AUTO;
@@ -1155,6 +1252,80 @@ public final class ToolRegistry {
     /** Single-quotes a value for safe inclusion in a shell command. */
     static String shellQuote(String value) {
         return "'" + value.replace("'", "'\\''") + "'";
+    }
+
+    /**
+     * Input through the accessibility service.
+     *
+     * <p>Gestures and global keys both go through APIs only this service may use,
+     * which is why they need no root. Text goes through {@code ACTION_SET_TEXT}
+     * on the focused field, which is both cleaner and more reliable than passing
+     * a string to a shell command.
+     */
+    private JSONObject accessibilityInput(String action, JSONObject args, String reason)
+            throws Exception {
+        requireConfirmation(ConfirmationGate.Kind.INPUT, "Inject input into the device",
+                "Send " + action + " " + describeInputTarget(action, args) + " to the foreground app"
+                        + " as " + requester() + " (through the accessibility service).", reason);
+
+        switch (action) {
+            case "tap":
+                AccessibilityBridge.gesture(requireInt(args, "x"), requireInt(args, "y"),
+                        requireInt(args, "x"), requireInt(args, "y"), 60);
+                break;
+            case "long_press": {
+                int x = requireInt(args, "x");
+                int y = requireInt(args, "y");
+                AccessibilityBridge.gesture(x, y, x, y, args.optInt("duration_ms", 800));
+                break;
+            }
+            case "swipe":
+                AccessibilityBridge.gesture(requireInt(args, "x"), requireInt(args, "y"),
+                        requireInt(args, "x2"), requireInt(args, "y2"),
+                        Math.max(1, args.optInt("duration_ms", 300)));
+                break;
+            case "text":
+                AccessibilityBridge.setText(require(args, "text"));
+                break;
+            case "key": {
+                int global = globalActionFor(args.optString("keycode", ""));
+                if (global == 0) {
+                    // Volume, media and other keys have no accessibility action;
+                    // say so plainly so the caller can pick another route.
+                    throw new IOException("'" + args.optString("keycode")
+                            + "' has no accessibility equivalent");
+                }
+                AccessibilityBridge.globalAction(global);
+                break;
+            }
+            default:
+                throw new McpTool.ToolError("unsupported action '" + action
+                        + "'. Use tap, swipe, long_press, text or key.");
+        }
+
+        JSONObject out = new JSONObject();
+        out.put("route", Capabilities.MODE_A11Y);
+        out.put("injected", true);
+        out.put("action", action);
+        return out;
+    }
+
+    /** Maps a key name onto the accessibility global action that performs it. */
+    private static int globalActionFor(String keycode) {
+        String key = keycode == null ? "" : keycode.trim().toUpperCase(Locale.ROOT);
+        if (key.startsWith("KEYCODE_")) {
+            key = key.substring("KEYCODE_".length());
+        }
+        switch (key) {
+            case "HOME": return android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME;
+            case "BACK": return android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK;
+            case "RECENTS":
+            case "APP_SWITCH": return android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_RECENTS;
+            case "NOTIFICATIONS": return android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS;
+            case "QUICK_SETTINGS": return android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS;
+            case "POWER_DIALOG": return android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_POWER_DIALOG;
+            default: return 0;
+        }
     }
 
     private static int requireInt(JSONObject args, String name) throws McpTool.ToolError {

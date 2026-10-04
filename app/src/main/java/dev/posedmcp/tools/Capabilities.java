@@ -34,6 +34,8 @@ public final class Capabilities {
     public static final String MODE_AUTO = "auto";
     public static final String MODE_SYSTEM = "system";
     public static final String MODE_ROOT = "root";
+    /** The accessibility service: no root, no hidden API, works while another app is in front. */
+    public static final String MODE_A11Y = "a11y";
 
     private final Context context;
     private final BridgeServer bridge;
@@ -49,6 +51,21 @@ public final class Capabilities {
 
     public boolean systemOnline() {
         return bridge != null && bridge.systemPeer() != null;
+    }
+
+    /** Whether the accessibility route is available. */
+    public static boolean accessibilityOnline() {
+        return dev.posedmcp.a11y.AccessibilityBridge.isConnected();
+    }
+
+    /**
+     * Screen capture through the accessibility service.
+     *
+     * <p>Preferred over the system route wherever it is available: it needs no
+     * root, and it is the only one of the two that still exists on Android 16.
+     */
+    public static Bitmap accessibilityScreenshot() throws IOException {
+        return dev.posedmcp.a11y.AccessibilityBridge.screenshot(20_000L);
     }
 
     /**
@@ -183,7 +200,12 @@ public final class Capabilities {
         if (bitmap == null) {
             throw new IOException("could not decode screenshot (unsupported format)");
         }
+        return encodeImage(bitmap, format, maxDimension, quality);
+    }
 
+    /** As above, for callers that already hold the bitmap. Consumes it. */
+    public static String encodeImage(Bitmap bitmap, String format, int maxDimension, int quality)
+            throws IOException {
         int width = bitmap.getWidth();
         int height = bitmap.getHeight();
         int longest = Math.max(width, height);
@@ -201,7 +223,7 @@ public final class Capabilities {
         Bitmap.CompressFormat compressFormat = "jpeg".equalsIgnoreCase(format)
                 ? Bitmap.CompressFormat.JPEG : Bitmap.CompressFormat.PNG;
         int effectiveQuality = compressFormat == Bitmap.CompressFormat.PNG ? 100 : quality;
-        ByteArrayOutputStream out = new ByteArrayOutputStream(raw.length / 2 + 1024);
+        ByteArrayOutputStream out = new ByteArrayOutputStream(1 << 16);
         try {
             if (!bitmap.compress(compressFormat, effectiveQuality, out)) {
                 throw new IOException("bitmap compression failed");

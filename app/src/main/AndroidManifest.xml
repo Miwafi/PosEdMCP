@@ -118,6 +118,26 @@
             android:exported="false"
             android:process=":dex" />
 
+        <!--
+          Screen capture, gesture injection and the view tree all come from here,
+          and so does staying resident: an app hosting an enabled accessibility
+          service holds a system binding and is not frozen when it leaves the
+          screen. That matters because the agent that needs this server is
+          usually the app in the foreground.
+        -->
+        <service
+            android:name=".a11y.PosEdAccessibilityService"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
         <provider
             android:name=".ipc.BridgeTokenProvider"
             android:authorities="dev.posedmcp.bridge"
