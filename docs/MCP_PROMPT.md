@@ -24,7 +24,10 @@
 
 - `root_shell_exec` — **以 uid 0 执行 shell 命令。永远弹窗，不可关闭。**
 - `screen_capture` — 截图。`mode=system` 走模块特权（弹"截屏"确认）；`mode=root` 走
-  `screencap`（弹 root 确认）。
+  `screencap`（弹 root 确认）；`mode=auto` 依次尝试无障碍 → system → root。
+  **图是作为图片返回的，直接看就行**，不用管 base64。图下方那行文字给出它的尺寸和走的路由
+  ——注意那是**缩放后**的尺寸，`ui_dump` 和 `input_inject` 用的是屏幕自己的像素坐标，
+  两者不一定相同，要按比例换算。
 - `ui_dump` — 导出无障碍控件树。用 `uiautomator` 实现，所以是 root 命令、必然弹窗。
 - `input_inject` — 注入点击/滑动/文本/按键。`mode=system` 走模块特权，`mode=root` 走
   `input` 命令。

@@ -189,7 +189,29 @@ public final class Capabilities {
      * PNG. Screenshots of a modern phone are megabytes; downscaling them is the
      * difference between a usable tool and one that blows the context window.
      */
-    public static String encodeImage(byte[] raw, String format, int maxDimension, int quality)
+    /**
+     * A screenshot after scaling and encoding, with what a caller needs to
+     * describe it: an agent that can see the image still needs to know how far it
+     * was scaled, or a coordinate read off the picture will not match the one
+     * ui_dump reported.
+     */
+    public static final class Encoded {
+        public final String base64;
+        public final String mimeType;
+        public final int width;
+        public final int height;
+        public final int bytes;
+
+        Encoded(String base64, String mimeType, int width, int height, int bytes) {
+            this.base64 = base64;
+            this.mimeType = mimeType;
+            this.width = width;
+            this.height = height;
+            this.bytes = bytes;
+        }
+    }
+
+    public static Encoded encodeImage(byte[] raw, String format, int maxDimension, int quality)
             throws IOException {
         Bitmap bitmap;
         try {
@@ -204,7 +226,7 @@ public final class Capabilities {
     }
 
     /** As above, for callers that already hold the bitmap. Consumes it. */
-    public static String encodeImage(Bitmap bitmap, String format, int maxDimension, int quality)
+    public static Encoded encodeImage(Bitmap bitmap, String format, int maxDimension, int quality)
             throws IOException {
         int width = bitmap.getWidth();
         int height = bitmap.getHeight();
@@ -224,6 +246,8 @@ public final class Capabilities {
                 ? Bitmap.CompressFormat.JPEG : Bitmap.CompressFormat.PNG;
         int effectiveQuality = compressFormat == Bitmap.CompressFormat.PNG ? 100 : quality;
         ByteArrayOutputStream out = new ByteArrayOutputStream(1 << 16);
+        int finalWidth = bitmap.getWidth();
+        int finalHeight = bitmap.getHeight();
         try {
             if (!bitmap.compress(compressFormat, effectiveQuality, out)) {
                 throw new IOException("bitmap compression failed");
@@ -231,7 +255,10 @@ public final class Capabilities {
         } finally {
             bitmap.recycle();
         }
-        return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
+        byte[] encoded = out.toByteArray();
+        return new Encoded(Base64.encodeToString(encoded, Base64.NO_WRAP),
+                compressFormat == Bitmap.CompressFormat.JPEG ? "image/jpeg" : "image/png",
+                finalWidth, finalHeight, encoded.length);
     }
 
     /** Confirmation helper so tools cannot forget to ask. */

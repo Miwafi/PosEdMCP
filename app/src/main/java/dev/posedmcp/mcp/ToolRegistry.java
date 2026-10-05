@@ -456,7 +456,9 @@ public final class ToolRegistry {
                         + " \n\nmode=a11y captures through the accessibility service; mode=system"
                         + " uses the module inside system_server; mode=root runs 'screencap' as root,"
                         + " which always prompts as a root shell command."
-                        + " \n\nThe image is downscaled by default so it stays cheap to look at.")
+                        + " \n\nThe screenshot comes back as an image you can look at, followed by"
+                        + " one line saying its size and which route produced it. The image is"
+                        + " scaled down; ui_dump and input_inject use the screen's own pixels.")
                 .mutating()
                 .input(props(
                         "mode", enumOf("Which capture path to use. Default auto",
@@ -535,13 +537,26 @@ public final class ToolRegistry {
                         }
                     }
 
+                    Capabilities.Encoded image = shot != null
+                            ? Capabilities.encodeImage(shot, format, maxDim, quality)
+                            : Capabilities.encodeImage(raw, format, maxDim, quality);
+
                     JSONObject out = new JSONObject();
                     out.put("route", route);
-                    out.put("format", format);
-                    out.put("imageBase64", shot != null
-                            ? Capabilities.encodeImage(shot, format, maxDim, quality)
-                            : Capabilities.encodeImage(raw, format, maxDim, quality));
-                    return McpTool.json(out);
+                    out.put("mimeType", image.mimeType);
+                    out.put("width", image.width);
+                    out.put("height", image.height);
+                    out.put("bytes", image.bytes);
+                    // The image travels as an image content block. The caption is
+                    // what a client that cannot show images still has to work
+                    // with, and it carries the one thing a model that can see the
+                    // picture would otherwise get wrong: its scale.
+                    return McpTool.image(image.base64, image.mimeType,
+                            "Screenshot of the current screen, " + image.width + "x" + image.height
+                                    + " pixels, via the " + route + " route. ui_dump and"
+                                    + " input_inject use the screen's own pixel coordinates, which"
+                                    + " are not necessarily these.",
+                            out);
                 })
                 .build());
 

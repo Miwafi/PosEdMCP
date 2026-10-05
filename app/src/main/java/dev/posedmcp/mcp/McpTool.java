@@ -221,6 +221,44 @@ public final class McpTool {
         return result;
     }
 
+    /**
+     * A result carrying an image, rather than a description of one.
+     *
+     * <p>MCP has a content type for this, and a client that supports multimodal
+     * input hands the picture to the model as a picture. Putting the same bytes
+     * in a text block - base64 inside JSON, which is what this used to do - gives
+     * the model a wall of characters it cannot look at, however multimodal it is.
+     *
+     * <p>A caption follows the image, so a client that cannot display one still
+     * gets a usable line, and a model that can see the picture is told how far it
+     * was scaled.
+     */
+    public static JSONObject image(String base64, String mimeType, String caption,
+            JSONObject structured) {
+        JSONObject result = new JSONObject();
+        JSONArray content = new JSONArray();
+        try {
+            JSONObject picture = new JSONObject();
+            picture.put("type", "image");
+            picture.put("data", base64);
+            picture.put("mimeType", mimeType);
+            content.put(picture);
+
+            JSONObject note = new JSONObject();
+            note.put("type", "text");
+            note.put("text", caption == null ? "" : caption);
+            content.put(note);
+
+            result.put("content", content);
+            if (structured != null) {
+                result.put("structuredContent", structured);
+            }
+            result.put("isError", false);
+        } catch (Throwable ignored) {
+        }
+        return result;
+    }
+
     /** An error the agent is expected to read and recover from. */
     public static JSONObject error(String message) {
         JSONObject result = new JSONObject();
