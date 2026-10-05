@@ -177,7 +177,7 @@ public class MainActivity extends AppCompatActivity {
         if (!isBatteryExempt()) {
             statusContent.addView(body("Battery optimisation also freezes the process in the"
                     + " background. Grant unrestricted battery use, and on ColorOS also allow"
-                    + " background activity for PosEdMCP in the battery settings."));
+                    + " background activity for 奈何桥 in the battery settings."));
         }
         statusContent.addView(body("Without the overlay permission, approval prompts fall back to"
                 + " a notification. If that also fails, privileged calls are refused."));
@@ -189,8 +189,8 @@ public class MainActivity extends AppCompatActivity {
         statusContent.addView(monoBlock(prefs.mcpToken()));
 
         LinearLayout tokenRow = row();
-        tokenRow.addView(tonalButton("Copy URL", v -> copy("PosEdMCP URL", url)));
-        tokenRow.addView(tonalButton("Copy token", v -> copy("PosEdMCP token", prefs.mcpToken())));
+        tokenRow.addView(tonalButton("Copy URL", v -> copy("奈何桥 URL", url)));
+        tokenRow.addView(tonalButton("Copy token", v -> copy("奈何桥 token", prefs.mcpToken())));
         tokenRow.addView(outlinedButton("Rotate", v -> {
             prefs.rotateTokens();
             if (McpService.instance() != null) {
@@ -227,7 +227,7 @@ public class MainActivity extends AppCompatActivity {
         serviceRow.addView(tonalButton("Accessibility", v -> {
             try {
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-                toast("Turn on PosEdMCP in the list");
+                toast("Turn on 奈何桥 in the list");
             } catch (Throwable t) {
                 toast("Could not open accessibility settings");
             }

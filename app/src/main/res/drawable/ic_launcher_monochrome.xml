@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  A bridge: a deck over a semicircular arch, a moon above it, and a band of mist
-  below. Everything sits inside the inner 56 of the 108 viewport, so no mask the
-  launcher applies can cut it.
+  The same bridge as a single-colour silhouette, for launchers that tint icons to
+  match the wallpaper palette (Android 13+). Only the shape matters here; the
+  launcher supplies the colour.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
@@ -10,20 +10,14 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Moon. -->
     <path
-        android:fillColor="#F0E6C8"
+        android:fillColor="#FFFFFF"
         android:pathData="M67,28a5,5 0 1 1 10,0a5,5 0 1 1 -10,0z" />
-
-    <!-- The bridge: deck, piers, and the arch cut out of them. -->
     <path
-        android:fillColor="#E3D8BC"
+        android:fillColor="#FFFFFF"
         android:fillType="evenOdd"
         android:pathData="M26,42h56v8h-56z M30,50h48v20h-48z M38,70a16,16 0 0 1 32,0z" />
-
-    <!-- Still water, or the mist coming off it. -->
     <path
-        android:fillAlpha="0.5"
-        android:fillColor="#3E6E6E"
+        android:fillColor="#FFFFFF"
         android:pathData="M30,74h48v3h-48z" />
 </vector>

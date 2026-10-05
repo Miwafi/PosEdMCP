@@ -199,12 +199,12 @@ public final class McpService extends Service {
                         ConfirmationGate.Kind.PEER,
                         "Application wants to connect",
                         pkg + describeApp(pkg),
-                        "This application hosts the PosEdMCP module and is asking to use the "
+                        "This application hosts the 奈何桥 module and is asking to use the "
                                 + "device bridge. Allowing it lets the module inside that app "
                                 + "receive injected code and report events. It does not by "
                                 + "itself grant any device control - every such action still "
                                 + "asks you separately.",
-                        "PosEdMCP", prefs.confirmTimeoutMs()));
+                        "奈何桥", prefs.confirmTimeoutMs()));
 
         if (decision.approved) {
             trust.approve(pkg);
@@ -287,7 +287,7 @@ public final class McpService extends Service {
         if (nm == null) {
             return;
         }
-        NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "PosEdMCP service",
+        NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "奈何桥 service",
                 NotificationManager.IMPORTANCE_LOW);
         channel.setDescription("Keeps the MCP endpoint and device bridge running");
         nm.createNotificationChannel(channel);
@@ -305,7 +305,7 @@ public final class McpService extends Service {
 
         return new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.stat_sys_download_done)
-                .setContentTitle("PosEdMCP is running")
+                .setContentTitle("奈何桥 is running")
                 .setContentText(status)
                 .setContentIntent(open)
                 .setOngoing(true)
