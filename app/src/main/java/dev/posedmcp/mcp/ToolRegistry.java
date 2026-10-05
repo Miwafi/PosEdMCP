@@ -55,7 +55,13 @@ import dev.posedmcp.xposed.LuaRuntime;
 public final class ToolRegistry {
 
     private static final int MAX_PACKAGES = 400;
-    private static final int MAX_UI_NODES = 600;
+
+    /**
+     * How long to let the display catch up with the approval window closing.
+     * Generous on purpose: it is paid once per approved action, and being too
+     * short means the agent reads its own prompt back as if it were the screen.
+     */
+    private static final long OVERLAY_SETTLE_MS = 400L;    private static final int MAX_UI_NODES = 600;
     private static final long MAX_DEX_BYTES = 32L * 1024 * 1024;
 
     private final Context context;
@@ -1228,13 +1234,32 @@ public final class ToolRegistry {
     }
 
     private void requireConfirmation(ConfirmationGate.Kind kind, String title, String detail,
-            String reason) throws McpTool.ToolError {        ConfirmationGate.Decision decision = ConfirmationGate.request(context,
+            String reason) throws McpTool.ToolError {
+        boolean willPrompt = ConfirmationGate.isRequired(context, kind);
+        ConfirmationGate.Decision decision = ConfirmationGate.request(context,
                 new ConfirmationGate.Request(kind, title, detail, reason, requester(),
                         prefs.confirmTimeoutMs()));
         if (!decision.approved) {
             throw new McpTool.ToolError("Refused: " + decision.note
                     + ". The action was not performed. Ask the user what they would prefer"
                     + " instead of retrying.");
+        }
+        if (willPrompt) {
+            // The approval window is gone as far as the window manager is
+            // concerned the instant the user taps the button, but the display is
+            // a frame or two behind that. A capture taken immediately after
+            // contains the approval prompt itself - which is exactly the thing
+            // the agent was about to read. Only waited for when a prompt was
+            // really shown, so a relaxed setting costs nothing.
+            sleepQuietly(OVERLAY_SETTLE_MS);
+        }
+    }
+
+    private static void sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
