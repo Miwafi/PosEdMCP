@@ -1,7 +1,0 @@
-# ninja log v5
-1	1310	8128711048179329	CMakeFiles/posednative.dir/posednative.c.o	540ffb676c4082b
-1311	1630	8128711051420318	E:/posedmcp/app/build/intermediates/cxx/Debug/c2i26411/obj/arm64-v8a/libposednative.so	ef73c4daf72fbf20
-1	105	8128714525360086	CMakeFiles/posednative.dir/posednative.c.o	540ffb676c4082b
-106	298	8128714527032044	E:/posedmcp/app/build/intermediates/cxx/Debug/c2i26411/obj/arm64-v8a/libposednative.so	ef73c4daf72fbf20
-5	112	8128715358282346	CMakeFiles/posednative.dir/posednative.c.o	540ffb676c4082b
-113	334	8128715360480060	E:/posedmcp/app/build/intermediates/cxx/Debug/c2i26411/obj/arm64-v8a/libposednative.so	ef73c4daf72fbf20
