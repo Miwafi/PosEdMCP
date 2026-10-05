@@ -1,411 +1,595 @@
 # PosEdMCP
 
-Android 上给本机 Agent 用的 MCP 服务器。LSPosed 模块 + root shell，让跑在手机里的
-Agent 能真正操作这台设备。
+English | [中文](README.zh-CN.md)
 
-不是"远程控制"：服务器跑在手机上，Agent 也在手机上，网络只走 `127.0.0.1`。
+An MCP server for an agent running on the Android device itself. An LSPosed module plus a
+root shell, so an agent living *on the phone* can actually operate the phone.
 
-## 它做什么
+This is not remote control: the server runs on the phone, the agent runs on the phone, and
+the network never leaves `127.0.0.1`.
 
-| 能力 | 走哪条路 | 是否需要用户确认 |
+> The app's launcher name is 奈何桥 ("Naihe Bridge"); PosEdMCP is the same thing.
+
+## What it does
+
+| Capability | Route | Confirmation |
 |---|---|---|
-| 设备/模块状态、应用列表、事件流 | 本进程 | 否 |
-| 当前前台应用、亮灭屏 | system_server 模块 | 否 |
-| 执行 shell 命令（uid 0） | `su` | **是，每次，不可关闭** |
-| 截图 | system_server 特权 / `screencap` | 是（可关闭 system 路径） |
-| 导出控件树 | `uiautomator`（root） | **是，不可关闭** |
-| 注入点击/滑动/文本/按键 | system_server 特权 / `input` | 是（可关闭 system 路径） |
-| 向第三方应用注入并调用代码 | LSPosed 作用域 + 内存 DEX | 是（可关闭） |
-| 应用进程接入设备桥 | 应用内模块主动连接 | **是，每个包一次，不可关闭** |
+| Device/module status, app list, event stream | this process | no |
+| Foreground app, screen on/off | system_server module | no |
+| Run a shell command (uid 0) | `su` | **yes, every time, cannot be disabled** |
+| Screenshot | system_server privileges / `screencap` | yes (the system route can be disabled) |
+| Dump the view tree | `uiautomator` (root) | **yes, cannot be disabled** |
+| Inject taps/swipes/text/keys | system_server privileges / `input` | yes (the system route can be disabled) |
+| Inject and call code in a third-party app | LSPosed scope + in-memory DEX | yes (can be disabled) |
+| An app process joining the device bridge | the module inside it dials out | **yes, once per package, cannot be disabled** |
 
-## 设计上的三个要点
+## Three things the design turns on
 
-**一、确认弹窗是唯一把关点。** 每次特权操作都会弹出浮层，逐字显示即将执行的命令和
-Agent 填写的理由，用户手动批准才执行。`root_shell_exec` 的确认不可关闭——这正是本
-项目存在的理由：Agent 不能执行用户没读过的命令。无法弹出（既无悬浮窗权限也无通知
-权限）时**拒绝执行**，而不是放行。
+**One: the confirmation dialog is the only gate.** Every privileged operation raises an
+overlay that spells out, word for word, the command about to run and the reason the agent
+gave for it. The user approves it by hand, or it does not happen. `root_shell_exec` cannot
+be relaxed — that is the whole point of the project: an agent must not run a command the
+user has not read. When the overlay cannot be shown (neither the overlay permission nor
+the notification permission is granted) the call is **refused**, not allowed through.
 
-**二、不做自动 fallback 链。** 哪些工具走 shell、哪些走模块特权是显式指定的——否则
-一个被放宽的设置可能悄悄降级成一条没人看过的 root 命令。
+**Two: there are no automatic fallback chains.** Which tools go through a shell and which
+use the module's platform access is spelled out explicitly. Otherwise a relaxed setting
+could quietly downgrade into a root command nobody ever read.
 
-**三、system_server 里不 hook 任何系统方法。** 截图和输入注入走隐藏 API 反射（全部
-包在 try/catch 里，失败退回 root 路径），前台应用用 2 秒轮询而非注册
-`TaskStackListener`——注册需要伸进 `ActivityTaskManager` 的私有单例和 AIDL 接口，
-写错就是 system_server 崩溃、手机无限重启。一个监控模块导致 bootloop 比少一个事件
-严重得多。
+**Three: nothing in system_server hooks a framework method.** Screenshots and input
+injection go through reflection over hidden APIs (all wrapped in try/catch, falling back
+to the root path), and the foreground app is found by polling every 2 seconds rather than
+registering a `TaskStackListener` — registering one means reaching into a private singleton
+of `ActivityTaskManager` and an AIDL interface, and getting it wrong is a system_server
+crash and a phone that reboots forever. A monitoring module that causes a bootloop is far
+worse than one missing an event.
 
-## 安装
+## Installation
 
-前置：已 root（Magisk / KernelSU）、已装 LSPosed、Android 9+。本项目在 Android 16 /
-arm64 上开发验证。
+Requires root (Magisk / KernelSU), LSPosed, and Android 9+. Developed and verified on
+Android 16 / arm64.
 
 ```bash
-./tools/bootstrap-gradle.sh     # 下载 Gradle（仅首次）
-echo "sdk.dir=E:/SDK" > local.properties   # Android SDK 路径，按需改
+./tools/bootstrap-gradle.sh     # downloads Gradle (first time only)
+echo "sdk.dir=E:/SDK" > local.properties   # Android SDK path, adjust as needed
 ./tools/gradle.sh assembleDebug
 adb install -r -t app/build/outputs/apk/debug/app-debug.apk
 ```
 
-在 LSPosed 管理器里启用 PosEdMCP，作用域勾选 **系统框架**（System Framework）。第三方
-应用按需勾选。**勾选后必须重启手机**——系统框架的 hook 在开机时注入。
+Enable PosEdMCP in LSPosed Manager and tick **System Framework** in its scope. Tick
+third-party apps as needed. **You must reboot after changing the scope** — the system
+framework hook is injected at boot.
 
-> 改完 APK 重新安装后，**也要重启**才让 system_server 用上新代码：模块类在进程启动时
-> 加载，而 system_server 只在开机时启动一次。
+> After changing the APK and reinstalling, **reboot as well** for system_server to pick up
+> the new code: module classes are loaded when a process starts, and system_server only
+> starts once, at boot.
 
-打开 PosEdMCP 应用，按界面上的 STATUS 一栏逐项处理：
+Open the app and work down the STATUS section:
 
-1. **悬浮窗权限**——审批弹窗要用。缺失时会退化成通知，再缺失就直接拒绝。
-2. **无障碍**——见下节。它同时负责保活和免 root 的截图/手势/控件树。
-3. 应用会自动启动服务并常驻通知栏；"ENDPOINT" 一栏是地址和 token。
+1. **Overlay permission** — the approval dialog needs it. Without it the prompt degrades
+   to a notification; without that too, privileged calls are refused outright.
+2. **Accessibility** — see the next section. It also provides screen capture, gestures and
+   the view tree without root.
+3. The app starts the service itself and keeps a notification in the shade; the ENDPOINT
+   section holds the address and token.
 
-### 无障碍：必须做的一步
+### Accessibility: the one step you cannot skip
 
-**没有它，这个服务器在最需要它的时候是死的。** 应用一离开屏幕，系统就会冻结它的进程
-（实测 ColorOS 在 24 秒内就冻）。被冻结的进程不再 accept 任何连接，MCP 端点完全失联，
-而且**在任何日志里都不留痕迹**——排查时极容易误判成崩溃或代码 bug。
+**Without it, this server is dead exactly when it is needed most.** The moment the app
+leaves the screen the platform freezes its process (measured: ColorOS does it within 24
+seconds). A frozen process stops accepting connections, the MCP endpoint goes completely
+silent, and **it leaves no trace in any log** — which makes it very easy to misdiagnose as
+a crash or a code bug.
 
-而 Agent 通常跑在**另一个应用**里（RikkaHub 之类），这正是我们的应用在后台的时刻。
+And the agent normally runs in **another app** (RikkaHub and the like), which is precisely
+when this app is in the background.
 
-解决办法是启用无障碍服务：宿主应用会持有系统绑定，因此不会被冻结。ROM 自己的无障碍
-设置页就写着这一条（"开启无障碍辅助功能后，应用将获得自启动权限，不受自启动管理页面
-设置项的影响"）。
+The fix is enabling the accessibility service: a process hosting one holds a system
+binding, so it is not frozen. The ROM's own accessibility screen says as much ("with
+accessibility enabled, an app gains the right to auto-start and is not affected by the
+auto-start management settings").
 
-同一个服务还顺带提供了**不需要 root** 的截图、手势注入和控件树读取——在 Android 16 上
-这不是锦上添花：`SurfaceControl` 已不再暴露 display token，system_server 那条截图路径
-根本不存在了。
+The same service also provides **root-free** screenshots, gesture injection and view-tree
+reads — which on Android 16 is not a luxury: `SurfaceControl` no longer exposes a display
+token, so the system_server screenshot route does not exist at all any more.
 
-实测对照（应用在后台、另一个应用在前台）：
+Measured, with this app in the background and another app in front:
 
-| | 修复前 | 启用无障碍后 |
+| | Before | With accessibility on |
 |---|---|---|
-| 冻结线程 | 全部（33/33 处于 `do_freezer_trap`） | 0/33 |
-| MCP 端点 | 完全无响应 | 连续 90 秒正常应答 |
+| Frozen threads | all (33/33 in `do_freezer_trap`) | 0/33 |
+| MCP endpoint | completely unresponsive | answering normally for 90 s straight |
 
-> **更新应用时不要用 `am force-stop`。** 它会把应用标记为停止状态，系统因此解除无障碍
-> 绑定——你会顺手毁掉保活，然后困惑于它为什么又被冻了。用 `kill <pid>`：系统会因为绑定
-> 而自动重启进程并重新绑定。
+> **Do not use `am force-stop` when updating the app.** It marks the app as stopped, the
+> system then drops the accessibility binding — you will have destroyed the keep-alive by
+> hand and then wondered why it got frozen again. Use `kill <pid>`: the system restarts the
+> process and rebinds because of the binding.
 >
 > ```bash
 > adb shell su -c "kill $(adb shell pidof dev.posedmcp)"
 > ```
 
-电池无限制（应用里的 **Battery settings**）仍然建议做，ColorOS 可能还需要在
-「设置 → 电池 → 应用电池管理」里额外允许后台活动，但**它单独不够**。
+Unrestricted battery (the **Battery** button in the app) is still worth doing, and on
+ColorOS you may additionally need to allow background activity for PosEdMCP under
+Settings → Battery → App battery management — but **that alone is not enough**.
 
-### 确认策略：什么该放宽，什么不该
+### Confirmation policy: what to relax, and what never to
 
-每个 `input_inject` / `screen_capture` / `ui_dump` 默认都弹窗。做界面自动化时这没法用
-——点一下弹一次。所以这三个（以及插件相关）可以在应用里关掉确认。
+`input_inject`, `screen_capture` and `ui_dump` prompt by default. That is unusable for UI
+automation — tap once, prompt once. So those three (and the plugin-related calls) can have
+their confirmation turned off.
 
-**`root_shell_exec` 永远弹窗，且不可关闭。** 这是有意的：放宽的只是模块/无障碍特权那条
-路，真正的权限边界不会因为一个设置而消失。
+**`root_shell_exec` always prompts and cannot be turned off.** That is deliberate: what
+gets relaxed is the module/accessibility route, and the real privilege boundary does not
+disappear because of a setting.
 
-### root 可用性
+### Root availability
 
-如果 root 管理器默认对应用隐藏 `su`（Magisk 的 SuList 模式、KernelSU 的类似机制），
-`su` 在应用进程里会**直接不存在**（`No such file or directory`）。注意用 `adb shell`
-或 `run-as` 验证会得到误导性结论——那两者继承的是 shell 的挂载命名空间，而普通应用
-进程不是。`device_info` 的 `root.diagnostics` 会指明具体是哪种情况。
+If the root manager hides `su` from apps by default (Magisk's SuList mode, KernelSU's
+equivalent), then inside an app process `su` **simply does not exist**
+(`No such file or directory`). Note that checking with `adb shell` or `run-as` gives a
+misleading answer — those two inherit the shell's mount namespace, and an ordinary app
+process does not. `device_info`'s `root.diagnostics` says which case you are in.
 
-## 接上客户端
+## Connecting a client
 
-服务器监听 `127.0.0.1:8765`，端点 `/mcp`（MCP Streamable HTTP），Bearer token 认证。
+The server listens on `127.0.0.1:8765`, endpoint `/mcp` (MCP Streamable HTTP), with Bearer
+token authentication.
 
-同机客户端直接连 `http://127.0.0.1:8765/mcp`。PC 上的客户端先 `adb forward`。
-客户端提示词见 [docs/MCP_PROMPT.md](docs/MCP_PROMPT.md)。`/health` 不需要认证，用来探活。
+A client on the same device connects to `http://127.0.0.1:8765/mcp` directly. A client on
+a PC needs `adb forward` first. The agent prompt is
+[docs/MCP_PROMPT.md](docs/MCP_PROMPT.md). `/health` needs no authentication and is there
+to check liveness.
 
-测试时建议绕开 `adb forward`——它在应用进程被替换后可能静默失效：
+For testing, it is worth bypassing `adb forward` — it can fail silently once the app
+process is replaced:
 
 ```bash
 POSEDMCP_TOKEN=<token> ./tools/mcp-call.sh '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-## 工具
+## Tools
 
-只读：`device_info`、`module_status`、`list_packages`、`foreground_app`、`events_poll`、
-`plugin_list`、`apk_info`、`apk_list`、`dex_classes`、`dex_search`、`smali_disassemble`、
-`smali_assemble`、`hook_records`、`script_list`。
+Read-only: `device_info`, `module_status`, `list_packages`, `foreground_app`,
+`events_poll`, `plugin_list`, `apk_info`, `apk_list`, `dex_classes`, `dex_search`,
+`smali_disassemble`, `smali_assemble`, `hook_records`, `hook_list`, `script_list`.
 
-需要确认：`root_shell_exec`、`screen_capture`、`ui_dump`、`input_inject`、`plugin_load`、
-`plugin_invoke`、`lua_exec`、`hook_method`、`hook_clear`、`invoke_method`。
+Prompt first: `root_shell_exec`, `screen_capture`, `ui_dump`, `input_inject`,
+`plugin_load`, `plugin_invoke`, `lua_exec`, `hook_method`, `hook_lua`, `hook_clear`,
+`invoke_method`.
 
-不确认但会改状态的：`launch_app`——把某个应用切到前台，等同于点它的图标。以及
-`script_save`——把一个脚本存进「自动化」页，只写本应用自己的存储，不改设备上任何东西。
-放在这里说是因为它们都不弹窗，而它们确实会改变你会看到的东西。
-`smali_assemble` 写文件同样不弹窗——真正的边界是**执行**，而那一步在 `plugin_load` 和
-`lua_exec` 上；自动化页里点 Run 就是执行。
+No prompt but still changes state: `launch_app` — brings an app to the front, exactly as
+tapping its icon would. And `script_save` — files a script into the app's own Scripts page,
+which only writes this app's own storage and changes nothing on the device. They are
+listed here because they do not prompt while still changing what you will see.
+`smali_assemble` writes files without prompting for the same reason — the real boundary is
+**execution**, and that happens in `plugin_load` and `lua_exec`; tapping Run on the Scripts
+page is execution.
 
-### 自动化页
+### The Scripts page
 
-应用界面分两个 Tab：**Status**（服务状态、端点、确认策略、工具清单）和 **Scripts**。
-Scripts 页列出模型替你存下的脚本，每条显示名称、作用、目标应用，以及**上一次运行的结果**；
-可以打开看源码、运行、删除。
+The app's UI has three tabs: **Status** (service state, endpoint, confirmation policy, tool
+list), **Scripts** and **Hooks**.
+The Scripts tab lists the scripts the model filed for you, each showing its name, what it
+does, its target app, and **the result of the last run**; you can open the source, run it,
+or delete it.
 
-在那一页点 Run **不再弹确认框**——那一下点击就是你本人的决定，再问一次等于问两遍。
-所以能给模型这条能力的前提是：脚本得由你先看过、而且是你自己去点。模型自己跑的路径
-（`lua_exec`）仍然每次都弹窗。
+Tapping Run there **does not raise a confirmation dialog** — that tap is your own decision,
+and asking again would be asking twice. So the precondition for giving the model this
+ability is that you have looked at the script and you are the one running it. The path the
+model runs by itself (`lua_exec`) still prompts every time.
 
-**点 Run 会先把目标应用拉到前台。** 这台 ROM 会在应用切到后台后几秒内冻结它，被冻结的
-进程不应答桥请求，脚本就只会超时——所以先把目标叫起来、等它的模块连上，再执行。代价是
-你会被切到那个应用去，而本应用此时在后台：**这依赖无障碍服务在运行**（没有它本应用也会被
-冻结、运行永远完不成）。因此无障碍没开时，Run 会直接说明原因并给一个跳转设置的按钮，
-而不是让你看着一个像脚本错误的失败。
+**Run brings the target app to the front first.** This ROM freezes an app within seconds of
+it going to the background, and a frozen process does not answer the bridge, so a script
+that ran anyway would only time out — hence starting the target, waiting for its module to
+connect, and then running. The cost is that you get switched to that app while this one
+goes to the background: **that depends on the accessibility service running** (without it,
+this app gets frozen too and the run never finishes). So when accessibility is off, Run
+says why and offers a button to the setting, instead of leaving you looking at a failure
+that looks like a script bug.
 
-界面是 **Material 3**（`Theme.Material3.DayNight.NoActionBar` + Material Components）：
-工具栏、TabLayout、脚本卡片、按破坏性分级的按钮（填充／色调／描边）、开关。颜色全部取自
-主题，所以在 Android 12+ 上跟随壁纸取色，别处用 Material 默认色——代码里没有一处写死颜色。
+The UI is **Material 3** (`Theme.Material3.DayNight.NoActionBar` + Material Components):
+toolbar, TabLayout, script cards, buttons graded by how destructive they are (filled /
+tonal / outlined), switches. Every colour comes from the theme, so on Android 12+ it
+follows the wallpaper palette and elsewhere falls back to Material's defaults — nothing in
+the code names a colour of its own.
 
-> Material3 主题本身继承 AppCompat 主题，所以 `MainActivity` 是 `AppCompatActivity`，
-> AppCompat 和 Material 也就进了模块的 dex：**APK 从 14 MB 涨到 26 MB**（debug、未混淆）。
-> 类是按需加载的，但模块 APK 会被注入每一个作用域进程，这个足迹值得知道。
-> 真要在意，可以给 release 打开 R8——目前两种构建都没开。
+> The Material3 theme inherits an AppCompat theme, so `MainActivity` is an
+> `AppCompatActivity`, and AppCompat and Material therefore end up in the module's dex:
+> **the APK went from 14 MB to 26 MB** (debug, unminified). Classes load on demand, but the
+> module APK is injected into every scoped process, so it is worth knowing about. If it
+> bothers you, turn R8 on for release — neither build has it on today.
 
-## 反编译与运行时观察
+## Decompilation and runtime observation
 
-给在设备上做逆向的 Agent 用。产出 smali 汇编和应用元信息，不做 Java 源码；改动通过
-**运行时注入**完成，不改 APK、不重签名。
+For an agent doing reverse engineering on the device. It produces smali assembly and
+application metadata, not Java source; changes are made by **runtime injection**, without
+touching the APK or re-signing anything.
 
 ```
-apk_info / apk_list     应用是什么：清单、组件、权限、签名、包内文件
+apk_info / apk_list       what the app is: manifest, components, permissions, signature, files
    ↓
-dex_classes / dex_search 里面有什么：类、方法、字符串
+dex_classes / dex_search  what is inside: classes, methods, strings
    ↓
-smali_disassemble       具体怎么写的
+smali_disassemble         how exactly it is written
    ↓
-hook_method             它运行时到底发生了什么（零 DEX，模块直接装钩子）
+hook_method               what actually happens at runtime (zero DEX, the module hooks it directly)
    ↓
-   ├─ 改动能用「值」表达（固定返回 / 换参数 / 改字段）→ 还是 hook_method。
-   │  它是数据不是代码：不用编译，不碰 DEX，记录里标 altered 证明生效过。
-   ├─ 改动是「逻辑」（循环、分支、拼字符串、连着调好几个 API）→ lua_exec。
-   │  同样不用编译：解释器随模块一起进了目标进程。
-   └─ 既不是「值」也不是「逻辑」的结构性改动 → smali_assemble → plugin_load
+   ├─ the change is a "value" (fix a return, swap an argument, set a field) → still hook_method.
+   │  That is data, not code: nothing to compile, no DEX touched, and records are marked
+   │  altered to prove it took effect.
+   ├─ the change is "logic" (loop, branch, build a string, call several APIs in a row) → lua_exec.
+   │  Also nothing to compile: the interpreter came into the target process with the module.
+   └─ neither a value nor logic, but a structural change → smali_assemble → plugin_load
 ```
 
-- 反汇编/汇编用 **baksmali/smali**，纯 Java，直接跑在 ART 上（apktool 不行，它的资源
-  解码要调用宿主机原生的 aapt2）
-- 清单解析用系统自己的 `PackageManager`，比任何重实现都准
-- 引擎跑在 `android:process=":dex"` 的独立进程里：大 APK 反编译吃内存，OOM 时只死这个
-  进程，MCP 端点和你正在看的确认弹窗不受影响
-- 大输出一律落盘、返回路径与统计数字；只有单个小类才内联
-- **hook 是每进程状态**，所以 `hook_method` / `hook_clear` / `plugin_load` 会作用于该包
-  的**所有**进程，`hook_records` 合并各进程结果并标注来源。一个应用常有多个进程，
-  只问其中一个会得到"没有 hook"这种误导性答案
+- Disassembly/assembly use **baksmali/smali**, pure Java, running directly on ART (apktool
+  does not work — its resource decoding calls a native aapt2 on the host)
+- The manifest is parsed with the platform's own `PackageManager`, which is more accurate
+  than any reimplementation
+- The engine runs in its own process (`android:process=":dex"`): decompiling a large APK
+  eats memory, and an OOM kills only that process, leaving the MCP endpoint and the
+  confirmation dialog you are looking at untouched
+- Large outputs always go to disk, returning a path and counts; only a single small class
+  is inlined
+- **Hooks are per-process state**, so `hook_method` / `hook_clear` / `plugin_load` act on
+  **every** process of the package, and `hook_records` merges results across processes with
+  their origin labelled. An app often has several processes, and asking only one of them
+  gets you the misleading answer "nothing is hooked"
 
-## 注入逻辑：为什么是 Lua
+## Injected logic: why Lua
 
-`invoke_method` 能表达「一次调用」，`hook_method` 能表达「一次改动」，但有很多事这两者都
-表达不了：先列目录、再按结果决定下一步、把几个返回值拼起来、循环遍历一批对象。这些是
-**逻辑**，而在此之前唯一的出路是手写 smali。
+`invoke_method` can express "one call" and `hook_method` can express "one change", but a
+great many things are neither: list a directory, then decide the next step from what came
+back; concatenate several return values; loop over a batch of objects. That is **logic**,
+and until recently the only way to express it was to hand-write smali.
 
-那条路对模型太陡，而且失败是**静默**的：一个空值守卫的分支极性写反，就什么都不列、
-什么都不追加、也不抛异常——看起来和「数据本来就不存在」一模一样。实测中，一个注入进
-GitHub 应用的探针正是这样得出「这个应用没登录」的结论，而它其实登录着。
+That road is too steep for a model, and its failures are **silent**: get the polarity of a
+single null guard backwards and it lists nothing, appends nothing, and throws nothing — it
+looks exactly like "the data is not there". In a real test, a probe injected into the
+GitHub app concluded "this app is not signed in" that way, when it was signed in all along.
 
-所以加了一个 Lua 解释器（LuaJ，纯 Java）：
+So there is a Lua interpreter (LuaJ, pure Java):
 
-- **不需要编译。** 解释器随本模块一起被 LSPosed 注入目标进程，脚本没有组装、传输、加载
-  这几步——它只是文本。
-- **确认弹窗显示脚本本身。** 比 smali 可读得多：用户看到的就是要跑的东西。
-- **能力面没有扩大。** 脚本能碰到的东西和现有工具是同一套：应用的 Context、类加载器、
-  它的方法（含私有）、字段、文件。它是已有权限的新语法，不是新权限。
-- **没有 `io` 和 `os`。** 文件只能经 `app.files` / `app.read` 读，而且只读。
-- **不会挂死应用。** 脚本跑过指令预算即被中断，且这个护栏脚本自己关不掉。
-- **`app.files` 读不到目录时抛错，而不是返回空表。** 空表只意味着一件事：目录确实是空的。
-  这一条是专门针对上面那类静默失败定的。
-- **`app.db` 只读。** 这是给「看不懂的应用看它存了什么」用的——混淆过的类名帮不上忙，数据库
-  结构能。只读不是限制而是重点：一个不能写的句柄破坏不了应用还开着的库；要写就该走应用
-  自己的 API（ContentResolver 之类），它才会顺带更新缓存、观察者和通知，裸 UPDATE 不会。
-  读数据库和读它的文件是同一级别的权限，而 `app.read` 早就有。
+- **Nothing to compile.** The interpreter is injected into the target process along with
+  the module, so a script has no assembly, transfer or load step — it is just text.
+- **The confirmation dialog shows the script itself**, which is far more readable than
+  smali: the user sees exactly what is about to run.
+- **It does not widen the capability surface.** A script can reach the same things the
+  existing tools can: the app's Context, its class loader, its methods (private ones
+  included), its fields, its files. It is a new syntax for existing privileges, not a new
+  privilege.
+- **No `io` and no `os`.** Files are readable only through `app.files` / `app.read`, and
+  read-only at that.
+- **It cannot hang the app.** A script is interrupted once it passes its instruction
+  budget, and the script cannot switch that guard off.
+- **`app.files` throws when it cannot read a directory rather than returning an empty
+  table.** An empty table means exactly one thing: the directory really is empty. This
+  rule exists specifically to kill the class of silent failure described above.
+- **`app.db` is read-only.** It is there for "this app is incomprehensible, what does it
+  store?" — obfuscated class names do not help, a database schema does. Read-only is not a
+  limitation but the point: a handle that cannot write cannot corrupt a database the app
+  still has open; writing should go through the app's own API (`ContentResolver` and the
+  like), which updates caches, observers and notifications along the way, and a bare UPDATE
+  does not. Reading a database is the same level of access as reading its files, which
+  `app.read` has always had.
 
-脚本拿到全局表 `app`：`name()`、`uid()`、`context()`、`class()`、`new()`、`call()`、
-`get()`、`set()`、`methods()`、`files()`、`exists()`、`read()`、`db()`、`log()`。`app.call` 走
-`getDeclaredMethod` + `setAccessible`，沿继承链找方法，重载按**实参类型契合度**打分选择
-（`ContentValues` 有九个两参 `put`，`put("title","Dentist")` 仍能选中 `put(String,String)`）；
-真的打平时**拒绝并列出候选**而不是猜，此时可以按 `app.methods` 打印的写法指定：
-`app.call(values, "put(String,Integer)", "key", 5)`。
+A script gets a global table `app`: `name()`, `uid()`, `context()`, `class()`, `new()`,
+`call()`, `get()`, `set()`, `methods()`, `files()`, `exists()`, `read()`, `db()`,
+`native`, `hook()`, `log()`. `app.call` goes through `getDeclaredMethod` +
+`setAccessible`, walks the inheritance chain, and picks an overload by **scoring how well
+the argument types fit** (`ContentValues` has nine two-argument `put`s, and
+`put("title","Dentist")` still picks `put(String,String)`); a genuine tie is **refused with
+the candidates listed** rather than guessed, and you can then spell it the way
+`app.methods` printed it: `app.call(values, "put(String,Integer)", "key", 5)`.
 
-smali 那条路保留：`invoke_method` 和 Lua 都表达不了的**结构性**改动仍然得走它。
+The smali road is still there: **structural** changes that neither `invoke_method` nor Lua
+can express still have to take it.
 
-## 注入到 native 层
+## Persistent hooks: why, and what they cost
 
-`app.native` 把代码往下一层推进：目标进程里的原生代码。模块本身就是从目标应用进程里运行的，
-所以它加载的 .so 就活在那个进程的地址空间里，够得到 Java 够不到的东西——应用自己的 .so、
-libc、以及任何符号名能解析到的地方。
+A runtime hook lives only inside **the process it was installed into**. On this device that
+is not a small problem: ColorOS freezes background apps within seconds and reaps them at
+will, so by the time the user does the thing you are watching for, the app may well be a
+freshly started process — and the hook is gone. The whole chain of "find the method → hook
+it → have the user do the thing → come back and read the records" is worth nothing at the
+next app start. That is not inconvenient; it makes the entire workflow unreliable.
 
-```
-app.native.status()           用了哪条加载路径，或为什么不可用
-app.native.probe()            自检
-app.native.open(path)         dlopen，返回一个小整数 id；失败返回 nil
-app.native.symbol(id, name)   dlsym，返回地址（"0x…"）；失败返回 nil
-app.native.call(addr, ...)    调用函数指针（最多六个参数）
-app.native.read(addr, len)    读内存，返回字节表
-app.native.write(addr, bytes) 写内存
-app.native.string(addr[, max]) 读 C 字符串
-app.native.error()            上一次 dlopen/dlsym 的错误
-```
-
-**几个必须知道的设计取舍：**
-
-- **地址是十六进制字符串，不是数字。** Lua 的数字在这里是 double，指针只有落在 53 位以内
-  才能原样往返——实测有一个没有，回来差了四个字节，下一次 `dlsym` 就把目标进程打挂了。
-  字符串是精确的，而且打印出来就能读。要用数值比大小就用 `app.native.number("0x…")`，
-  它只在能精确表示时返回值，否则给 nil——而不是悄悄四舍五入。
-- **dlopen 句柄不离开 native 层。** 这台设备上句柄不总是地址：非默认命名空间里的库拿到的是
-  linker 内部表的合成值。把它发到 Java、Lua 再传回来会让 `dlsym` 在 linker 自己的命名空间
-  查找里崩掉，所以调用方拿到的是一个小 id，真实句柄留在 C 侧的表里。
-- **参数和返回值是机器字**，所以这里只调整数/指针函数：浮点、double、结构体按值传递都无法
-  表达。这是只传字长的桥的固有边界，不是以后能补上的。
-- **读写坏地址会直接带走目标进程。** 这就是伸手进别人内存的本质，不做兜底。脚本要读之前
-  先想清楚地址从哪来。
-
-**.so 是怎么进去的：** 模块 APK 里带着 `lib/arm64-v8a/libposednative.so`，在目标进程里用
-`<apk>!/lib/<abi>/lib.so` 这个形式 `System.load`——Android 的 linker 认这种写法，而 APK 所在
-的文件上下文是应用可以执行的，所以不需要往任何地方写文件。**实测确认可行**（nativeloader
-日志：`Load …base.apk!/lib/arm64-v8a/libposednative.so using isolated ns … : ok`）。
-
-> 模块无法自己找到这个路径：它的类加载器给不出 code source，PackageManager 又看不到它不属于
-> 的应用。**由本应用通过桥把路径告诉它。**
-
-## 架构
+So `hook_method` and `hook_lua` do not just install a hook — they **write it down**:
 
 ```
-┌──────────────── 应用进程 (dev.posedmcp) ────────────────┐
-│  McpService (前台服务)                                  │
-│    ├── HttpTransport  127.0.0.1:8765  /mcp              │
-│    ├── McpServer      JSON-RPC, 工具分发                │
-│    ├── ToolRegistry   26 个工具 + 确认策略               │
-│    ├── ConfirmationGate ──> ConfirmOverlay (应用浮层)   │
-│    ├── BridgeServer   127.0.0.1:8766  (进程间桥)         │
-│    ├── RootShell      su, 管道 stdio（非 pty）           │
-│    └── EventStore     环形事件缓冲 + seq 游标            │
-└──────────────────────────────────────────────────────────┘
-             ▲ TCP + token / 首次连接由用户批准
+hook_method / hook_lua
+   ├─ installs it right now in every live process of that app (as before, so you can see whether it took)
+   └─ files the definition in the app's own hook library
+          ↓
+   a process starts and its module connects to the bridge
+          ↓
+   the app pushes that package's *enabled* hooks back into it (hook_method / lua_exec)
+          ↓
+   hook_list shows "last armed at", and the Hooks page shows it as on
+```
+
+The definitions live in this app's own SharedPreferences (the module cannot read them —
+every cross-uid read of prefs is walled off on this device), and **the app pushes them back
+when a peer connects**. The push has to happen on its own thread: the thread that accepted
+the connection is about to become that peer's read loop, and sending a request from it
+would wait for a reply nothing was reading — a deadlock.
+
+**The cost has to be said out loud: a persistent hook prompts only once.** After that it
+takes effect every time the app starts, without asking anyone. That touches the very core
+of this project, where the confirmation dialog is the only gate. What replaces it is the
+**Hooks page**: grouped by app, expanded to list each hook (layer, target method, a text
+description, when it was last armed or why it failed), with a switch and a delete button.
+Which means that page **has to be accurate**, and **switching off or deleting has to reach
+into the live process and unhook**, not merely cross out a record — otherwise the user
+believes they stopped it while it comes back at the next app start. `hook_clear` works the
+same way: it deletes the saved definition along with the live hook.
+
+**Lua can hook too.** `app.hook{...}` hands the module a Lua function, which is held on the
+Java side — the script's environment is discarded when it finishes, so that reference is
+the only thing keeping the closure alive — and it is called back on every match. It is the
+only form in which Lua can "keep working after it has finished", and it fills exactly the
+gap `lua_exec` could not. Persisting it means storing the script and re-running it at
+process start to arm itself, so **the script should do nothing but register the hook**.
+
+An error inside a hook body never reaches the application (whose own call it is
+interrupting), but it **is** recorded and reported by `hook_records` as `bodyError` — a
+hook that throws on every call otherwise looks exactly like one that matches nothing, and
+that is precisely why this module was rewritten.
+
+## Injecting into the native layer
+
+`app.native` pushes code one level further down: the native code inside the target process.
+The module itself runs from inside the target application's process, so the .so files it
+loads live in that process's address space, reaching things Java cannot — the app's own
+.so files, libc, and anywhere a symbol name resolves.
+
+```
+app.native.status()           which load path was used, or why it is unavailable
+app.native.probe()            self-check
+app.native.open(path)         dlopen, returns a small integer id; nil on failure
+app.native.symbol(id, name)   dlsym, returns the address ("0x…"); nil on failure
+app.native.call(addr, ...)    call a function pointer (up to six arguments)
+app.native.read(addr, len)    read memory, returns a table of bytes
+app.native.write(addr, bytes) write memory
+app.native.string(addr[, max]) read a C string
+app.native.error()            the last dlopen/dlsym error
+```
+
+**Trade-offs you have to know about:**
+
+- **Addresses are hex strings, not numbers.** A Lua number here is a double, and a pointer
+  only round-trips exactly if it fits in 53 bits — measured, one did not, came back four
+  bytes off, and the next `dlsym` took the target process down. A string is exact, and it
+  is readable when printed. To compare numerically use `app.native.number("0x…")`, which
+  returns a value only when it can be represented exactly and nil otherwise — rather than
+  quietly rounding.
+- **dlopen handles never leave the native layer.** On this device a handle is not always an
+  address: a library in a non-default namespace gets a synthetic value from an internal
+  linker table. Sending that out to Java and Lua and back makes `dlsym` crash inside the
+  linker's own namespace lookup, so callers get a small id and the real handle stays in a
+  table on the C side.
+- **Arguments and return values are machine words**, so this only drives integer/pointer
+  functions: floats, doubles and structs passed by value cannot be expressed. That is the
+  inherent limit of a word-sized bridge, not something to be filled in later.
+- **Reading or writing a bad address takes the target process with it.** That is the nature
+  of reaching into someone else's memory; there is no safety net. Where a script's
+  addresses come from determines how dangerous it is.
+
+**How the .so gets in:** the module APK carries `lib/arm64-v8a/libposednative.so`, and
+inside the target process it is `System.load`ed as `<apk>!/lib/<abi>/lib.so` — Android's
+linker understands that form, and the file context of the APK is executable by the app, so
+nothing has to be written anywhere. **Verified on the device** (nativeloader log:
+`Load …base.apk!/lib/arm64-v8a/libposednative.so using isolated ns … : ok`).
+
+> The module cannot find that path itself: its class loader gives no code source, and the
+> PackageManager cannot see an application it does not own. **This app tells it the path
+> over the bridge.**
+
+## Architecture
+
+```
+┌──────────────── app process (dev.posedmcp) ─────────────────┐
+│  McpService (foreground service)                            │
+│    ├── HttpTransport  127.0.0.1:8765  /mcp                  │
+│    ├── McpServer      JSON-RPC, tool dispatch               │
+│    ├── ToolRegistry   28 tools + confirmation policy        │
+│    ├── ConfirmationGate ──> ConfirmOverlay (app overlay)    │
+│    ├── BridgeServer   127.0.0.1:8766  (in-device bridge)    │
+│    ├── RootShell      su, piped stdio (not a pty)           │
+│    └── EventStore     ring buffer + seq cursor              │
+└─────────────────────────────────────────────────────────────┘
+             ▲ TCP + token / first connection approved by the user
              │
-┌────────────┴───────────┐   ┌────────────────────────────┐
-│ system_server (role=   │   │ 被作用域覆盖的应用          │
-│   system)              │   │  AppHost                   │
-│  SystemHooks           │   │   ├ 内存 DEX 加载          │
-│   ├ 截图 / 输入注入     │   │   └ 插件调用               │
-│   ├ 前台应用轮询        │   │                            │
-│   └ 亮灭屏广播          │   │                            │
-└────────────────────────┘   └────────────────────────────┘
+┌────────────┴────────────┐   ┌──────────────────────────────┐
+│ system_server           │   │ scoped third-party apps      │
+│  (role=system)          │   │  AppHost                     │
+│  SystemHooks            │   │   ├ in-memory DEX loading    │
+│   ├ screenshot / input  │   │   ├ plugin invocation        │
+│   ├ foreground polling  │   │   └ hook registry            │
+│   └ screen on/off       │   │                              │
+└─────────────────────────┘   └──────────────────────────────┘
 ```
 
-插件以字节流经桥接送进目标进程，用 `InMemoryDexClassLoader` 加载、**不落盘**——否则
-每次注入都要先经 root 命令推文件，等于每次多一次弹窗。
+Plugins travel into the target process as a byte stream over the bridge and are loaded with
+`InMemoryDexClassLoader`, **never written to disk** — otherwise every injection would first
+have to push a file through a root command, which is one more confirmation dialog each
+time.
 
-多个进程的应用（闹钟有主进程和 `:clockWidget`）以 `包名:pid` 分别登记；插件装在哪个
-进程，调用就路由到哪个。
+An app with several processes (the clock has a main process and `:clockWidget`) registers
+each as `package:pid`; a plugin is loaded into whichever process, and calls are routed
+there.
 
-## 凭据是怎么送到模块手里的
+## How credentials reach the module
 
-这是本项目里最绕的一段，因为 **Android 把带外通道全堵死了**：
+This is the most convoluted part of the project, because **Android has every out-of-band
+channel walled off**:
 
-| 通道 | 结果 |
+| Channel | Result |
 |---|---|
-| 抽象 Unix socket | SELinux 拒绝 `connectto`（`untrusted_app` → `untrusted_app`，安全类别不同）——平台设计边界，不是配置问题 |
-| ContentProvider | 包可见性：`Unknown authority`。宿主应用的 manifest 不是我们能改的 |
-| 显式 `bindService` | 同样被包可见性挡住，`bindService` 直接返回 false（系统应用和 uid 1000 不受影响，所以 systemui 反而连得上） |
-| 直接读文件 | Android 16 把 prefs 移到 `/data/misc/<uuid>/prefs/`，跨 uid 进不去；即使 `chcon` 去掉类别，`untrusted_app` 读 `app_data_file` 仍受限 |
-| `XSharedPreferences` | 框架自己的机制，依赖守护进程在开机时放权，实测未生效 |
+| Abstract Unix socket | SELinux refuses `connectto` (`untrusted_app` → `untrusted_app`, different security categories) — a platform design boundary, not a configuration problem |
+| ContentProvider | Package visibility: `Unknown authority`. The host app's manifest is not ours to change |
+| Explicit `bindService` | Also blocked by package visibility, `bindService` just returns false (system apps and uid 1000 are exempt, which is why systemui can connect) |
+| Reading the file directly | Android 16 moved prefs to `/data/misc/<uuid>/prefs/`, unreachable across uids; even stripping the category with `chcon` leaves `untrusted_app` restricted from reading `app_data_file` |
+| `XSharedPreferences` | The framework's own mechanism, relying on the daemon granting access at boot — measured, it does not work here |
 
-于是改成**在应用已经建立的那条连接上发放凭据**：应用连上桥但不带 token 时，弹窗问
-用户"某个包要接入"，批准后把 token 交给他并记住。每个包问一次；被拒绝的包在 10 分钟内
-不再重复打扰。
+So the credentials are **handed out over the connection the app has already established**:
+when an app connects to the bridge without a token, a dialog asks the user whether to trust
+"some package", and on approval the token is handed over and remembered. It asks once per
+package, and a refused package is not bothered again for 10 minutes.
 
-这不是密码学意义上的强身份——批准的是"声称自己是这个包的那条连接"。它换来的是**完整性**
-（防止别的进程伪造事件、抢答伪造截图），而不是机密性；真正的权限边界始终是那个确认弹窗。
-对作用域内的应用，token 本来也藏不住：模块就跑在人家进程里。
+This is not cryptographically strong identity — what gets approved is "the connection that
+claims to be this package". What it buys is **integrity** (another process cannot forge
+events or race the real peer with a forged reply), not confidentiality; the real privilege
+boundary is still the confirmation dialog. For a scoped app the token was never going to
+stay secret anyway: the module runs inside it.
 
-保留的其它通道作为优化路径：外部媒体目录 `Android/media/<pkg>/`、Binder 服务、
-ContentProvider——能通就用，省掉一次弹窗。
+The other channels are kept as optimisation paths: the external media directory
+`Android/media/<pkg>/`, Binder services, ContentProvider — if one works, use it and save a
+dialog.
 
-## 开发
+## Development
 
 ```bash
 ./tools/gradle.sh assembleDebug
-./tools/build-plugin.sh          # 示例插件 → tools/plugin-demo/build/plugin.b64
+./tools/build-plugin.sh          # sample plugin → tools/plugin-demo/build/plugin.b64
 ```
 
-`tools/gradle.sh` 把 `GRADLE_USER_HOME` 重定向到仓库内的 `.gradle-home/`：Windows 用户
-目录含非 ASCII 字符时部分工具链会出问题。代理设置放在 `.gradle-home/gradle.properties`，
-不进版本库。
+`tools/gradle.sh` redirects `GRADLE_USER_HOME` into the repository's `.gradle-home/`: some
+of the toolchain breaks when the Windows user directory contains non-ASCII characters.
+Proxy settings go in `.gradle-home/gradle.properties`, which is not tracked.
 
-需要 JDK 17+（本项目用 JDK 22 验证）。
+JDK 17+ is required (this project was verified with JDK 22).
 
-## 已知限制
+## Known limitations
 
-- **system 路径的截图在本机不可用**。Android 16 移除了 `SurfaceControl.getPhysicalDisplayToken`
-  和 `getPhysicalDisplayIds`——运行时枚举确认这两个方法在该设备的 framework 里根本不存在，
-  不是反射写法问题。`ScreenCapture.captureDisplay` 需要一个 display token，而没有公开的
-  途径拿到它。root 的 `screencap` 路径覆盖了这个能力：`screen_capture` 的 `mode=auto`
-  会先问 system_server 上一次的失败原因，跳过这条死路，直接走 root（一次确认）。
-  其余 system 能力（前台追踪、事件、输入注入）均正常。
-- 没有单元测试。所有验证都是在真机上按行为做的。
-- **自动化页的 Run 要求无障碍服务在运行**，理由见上：它会把你切到目标应用，本应用于是
-  在后台，而没有无障碍绑定就会被系统冻结、运行永远完不成。无障碍关闭时页面会直接说明，
-  不会把它伪装成脚本失败。
-- **`app.native` 读/写坏地址会连带杀死目标应用。** 这是直接操作别人进程内存的固有代价，
-  没有兜底；脚本拿到的地址从哪来，决定了它有多危险。
-- **`lua_exec` 的指令预算只约束 Lua 本身。** 脚本如果把时间花在慢的 Java 调用上（网络、
-  文件），预算不会触发，只能靠桥的请求超时兜底——而超时后脚本所在线程仍会把当前调用跑完，
-  这一点和 `plugin_invoke` 一样。
+- **The system screenshot route does not work on this device.** Android 16 removed
+  `SurfaceControl.getPhysicalDisplayToken` and `getPhysicalDisplayIds` — runtime
+  enumeration confirms neither method exists in this device's framework at all, so it is
+  not a matter of how the reflection is written. `ScreenCapture.captureDisplay` needs a
+  display token and there is no public way to get one. The root `screencap` route covers
+  the capability: `screen_capture` with `mode=auto` first asks system_server why its last
+  attempt failed, skips the dead end and goes straight to root (one confirmation). The
+  other system capabilities (foreground tracking, events, input injection) are fine.
+- There are no unit tests. Every verification was done by behaviour on a real device.
+- **Run on the Scripts page requires the accessibility service to be running**, for the
+  reason above: it switches you to the target app, which puts this app in the background,
+  and without an accessibility binding the system freezes it there and the run never
+  finishes. When accessibility is off the page says so directly rather than dressing it up
+  as a script failure.
+- **`app.native` reading or writing a bad address kills the target app along with it.**
+  That is the inherent cost of reaching directly into another process's memory and there is
+  no safety net; where a script's addresses come from determines how dangerous it is.
+- **`lua_exec`'s instruction budget only constrains Lua itself.** A script that spends its
+  time in slow Java calls (network, files) will not trip the budget and is only bounded by
+  the bridge's request timeout — and after a timeout the script's thread still finishes the
+  call it is in, the same as `plugin_invoke`.
+- **A persistent hook can miss the very earliest calls of an app start.** Re-arming takes
+  one round trip over the bridge (process starts → module connects → app pushes the
+  definition back → installed), so calls as early as `Application.onCreate` are usually
+  already past. Catching those would have to happen in the LSPosed scope layer, which is
+  outside this tool's scope.
+- **Hooks at the native layer are not implemented.** The `layer` field on the Hooks page
+  can only ever read `dex` today — it is there because native is the next step, not because
+  there are currently two values. An arm64 inline hook (overwriting a function prologue
+  plus a trampoline) carries a lot of risk — a bad prologue or a missed instruction-cache
+  flush takes the target process down — and deserves a round of its own.
 
-### 调试隐藏 API 时的两个坑
+### Two traps when debugging hidden APIs
 
-- **`Class.getDeclaredMethods()` 会被隐藏 API 过滤**：返回的列表里只有公开成员，看起来像
-  "这个方法不存在"。必须先在进程内装好豁免（`VMRuntime.setHiddenApiExemptions`，
-  见 `HiddenApi.java`），否则整条反射链会静默地什么都找不到。
-- 设备上的 `/system/framework/framework.jar` 是**桩**，里面的 dex 没有真实实现，不能用来
-  查方法签名。用 `device_info` 的 `displayProbe` 在运行时枚举才准。
+- **`Class.getDeclaredMethods()` is filtered by the hidden API policy**: the list you get
+  back contains only public members, which looks like "this method does not exist". The
+  exemptions have to be installed in the process first
+  (`VMRuntime.setHiddenApiExemptions`, see `HiddenApi.java`), or the whole reflection chain
+  silently finds nothing.
+- The device's `/system/framework/framework.jar` is a **stub**: the dex inside has no real
+  implementations and cannot be used to look up method signatures. Enumerating at runtime
+  via `device_info`'s `displayProbe` is the only accurate way.
 
-## 状态
+## Status
 
-已在 OnePlus PLR110 / Android 16 / arm64-v8a / Magisk v27.2-kitsune-4 /
-Zygisk-LSPosed 1.10.2 (7182) 上验证：
+Verified on OnePlus PLR110 / Android 16 / arm64-v8a / Magisk v27.2-kitsune-4 /
+Zygisk-LSPosed 1.10.2 (7182):
 
-- 模块被 LSPosed 正确加载；system_server 走 `SystemHooks` 分支并连上桥（`role=system`）
-- MCP 握手、`tools/list`、鉴权（含 401 拒绝路径）
-- root shell 执行与逐条确认弹窗；中文理由渲染逐字正确
-- `ui_dump` 端到端跑通
-- system 路径的**前台应用查询**与**输入注入**（`InputManagerGlobal.injectInputEvent`，
-  不经 shell），以及 `foreground.changed` / `screen.on|off` 事件流
-- `screen_capture` 的 `mode=auto` 在 system 路径不可用时正确回退到 root
-- **向 `com.coloros.alarmclock` 注入插件并 hook 到 `Activity.onResume`**，
-  按行为验证（返回了该应用真实的 Activity 生命周期）
-- 多进程应用的 peer 登记与路由
-- **静态分析链路**：`apk_info` / `dex_classes` / `dex_search` 字段与 `dumpsys package`
-  对得上；`smali_disassemble` → `smali_assemble` 往返后方法签名与原始一致
-- **运行时观察链路**：在时钟进程里 hook `Activity.onResume`，切前后台后
-  `hook_records` 读到 3 条真实调用（线程与时间戳均正确）
-- **端到端注入**：反汇编应用的闹钟解析函数拿到正式的 Bundle 契约，注入插件调用
-  应用自己的 `add_alarm` 接口，在时钟应用里创建出一个 **06:07 / 标签 "PosEdMCP" /
-  已启用** 的闹钟，并用 `delete_alarm` 清理了过程中的临时闹钟
-- **保活**：启用无障碍后，应用在后台、另一个应用在前台时，实测 90 秒内**零冻结线程**
-  且 MCP 端点持续应答（修复前是 33/33 线程处于 `do_freezer_trap`、端点完全失联）
-- **无需 root 的界面操作**：`launch_app` 成功把 GitHub 应用切到前台（前台窗口为
-  `com.github.android/.main.MainActivity`）
-- **`lua_exec` 在 `com.github.android` 进程内跑通**：脚本列出该应用数据目录的 8 个条目与
-  `shared_prefs` 下的 10 个文件，并读到它自己 `AccountManager` 里的 `yunqinglt /
-  com.github.android` —— 同一个检查用手写 smali 探针跑时返回了空串，并在阳性对照下暴露
-  出那是探针 bug 而不是设备状态
-- **`app.db`**：只读打开 `com.github.android` 正在使用的 WAL 库，列出 15 张表、读回
-  `recent_searches` 的真实行（`sunflower233`、`mlinux-project`、`micode`）；库不存在和表
-  不存在都给出具体错误
-- **自动化页**：`script_save` 存下的脚本出现在 Scripts 页，显示名称、目标应用、作用与
-  上次运行结果；点 Run 会真的经桥执行并把结果写回卡片（实测中目标进程在后台被冻结，
-  卡片如实显示 `FAILED … timed out`）
+- The module is loaded correctly by LSPosed; system_server takes the `SystemHooks` branch
+  and connects to the bridge (`role=system`)
+- MCP handshake, `tools/list`, and authentication (including the 401 rejection path)
+- Root shell execution and the per-command confirmation dialog; a Chinese reason renders
+  character-for-character correctly
+- `ui_dump` works end to end
+- The system route for **foreground app queries** and **input injection**
+  (`InputManagerGlobal.injectInputEvent`, not through a shell), plus the
+  `foreground.changed` / `screen.on|off` event stream
+- `screen_capture` with `mode=auto` correctly falls back to root when the system route is
+  unavailable
+- **A plugin injected into `com.coloros.alarmclock`, hooked to `Activity.onResume`**,
+  verified by behaviour (it returned that app's real activity lifecycle)
+- Peer registration and routing for a multi-process app
+- **The static analysis chain**: `apk_info` / `dex_classes` / `dex_search` fields agree
+  with `dumpsys package`; a `smali_disassemble` → `smali_assemble` round trip preserves
+  method signatures exactly
+- **The runtime observation chain**: hooking `Activity.onResume` in the clock's process and
+  switching foreground/background, after which `hook_records` read back 3 real calls (both
+  thread and timestamps correct)
+- **End-to-end injection**: disassembling the app's alarm-parsing function to recover the
+  real Bundle contract, then injecting a plugin that calls the app's own `add_alarm`
+  interface and created an alarm in the clock app reading **06:07 / label "PosEdMCP" /
+  enabled**, cleaning up the temporary alarms it created along the way with `delete_alarm`
+- **Keep-alive**: with accessibility enabled and this app in the background while another
+  app is in front, measured **zero frozen threads** over 90 seconds with the MCP endpoint
+  answering continuously (before the fix: 33/33 threads in `do_freezer_trap`, endpoint
+  completely unreachable)
+- **Root-free UI operation**: `launch_app` brought the GitHub app to the front (foreground
+  window `com.github.android/.main.MainActivity`)
+- **`lua_exec` runs inside `com.github.android`**: the script listed the 8 entries of that
+  app's data directory and the 10 files under `shared_prefs`, and read `yunqinglt /
+  com.github.android` out of its own `AccountManager` — while the same check run as a
+  hand-written smali probe returned an empty string, and a positive control showed that to
+  be a probe bug rather than the device's state
+- **`app.db`**: read-only opening of the WAL database `com.github.android` was actively
+  using, listing 15 tables and reading back real rows from `recent_searches`
+  (`sunflower233`, `mlinux-project`, `micode`); a missing database and a missing table both
+  produce specific errors
+- **The Scripts page**: a script filed by `script_save` appears there with its name, target
+  app, purpose and last run result; tapping Run really executes it over the bridge and
+  writes the result back to the card (in that test the target process was frozen in the
+  background, and the card honestly showed `FAILED … timed out`)
+- **Persistent hooks (end to end, except for the one manual approval)**: with a hook
+  definition placed in the hook library, **the target app was a freshly started process** —
+  as soon as its module connected to the bridge the hook was installed by itself, and
+  `hook_records` read back 3 real `Activity.onResume` calls (thread `main`, timestamps
+  correct); a second process of the same app started later (`:clockWidget`) was armed
+  automatically too. No confirmation dialog was raised anywhere in that run, which is
+  exactly what persistence had to prove
+- **Switching off takes effect immediately**: turning the switch off on the Hooks page
+  unhooked the live process on the spot (`hook_records` became "nothing is hooked"), and
+  **it did not come back when that app restarted**; turning it back on armed the running
+  process again immediately
+- **Lua hooks**: `app.hook{...}` registered and persisted; the callback fired on real calls,
+  a local variable in the closure accumulated across calls (`#3` in the log), and
+  `ctx.this` resolved to the real instance with `ctx.args` of length 0 — all as expected
+- **The Hooks page**: grouped by app, collapsed by default, expanding into the second level
+  to list `DEX · RULE` / `DEX · LUA`, the target method, a text description and
+  `last armed <time>`, with a switch and a delete button
 
-### 尚未验证
+### Not yet verified
 
-- 无障碍路由的 `ui_dump` / `screen_capture` / `input_inject` —— 实现完成、编译通过、
-  路由已接，但还没在真机上跑过完整一轮（每次都需要人工点确认弹窗）。
-  非 root 的界面自动化正是这条路的重点，值得先跑一遍
-  [docs/GITHUB_STAR_DEMO.md](docs/GITHUB_STAR_DEMO.md)。
-- 有一次读取工具返回值的实验里看到中文变成 U+FFFD。同一份数据在应用自己的日志里是
-  完好的，所以最可能出在测试客户端而不是服务端；但在查清之前，任何**从服务端读回中文**
-  的地方都值得留意。
+- **The registration paths of the `hook_method` / `hook_lua` tools themselves** (and the
+  Hooks page's delete button) have not been through a full round: they raise a confirmation
+  dialog, so they need a human to tap Allow once. The verifications above went through
+  **the same** save → re-arm path, with the definition written in as a file.
+- A Lua hook's `set_result` / `set_arg` / `set_field` — the half that actually **changes**
+  behaviour rather than observing it — has not been run on the device yet.
+- The accessibility routes for `ui_dump` / `screen_capture` / `input_inject` are
+  implemented, compiled and wired up, but have not been through a full round on a real
+  device (each one needs a human to tap the confirmation dialog). Root-free UI automation
+  is the whole point of that route and is worth a first run —
+  [docs/GITHUB_STAR_DEMO.md](docs/GITHUB_STAR_DEMO.md).
+- In one experiment reading a tool result, Chinese text came back as U+FFFD. The same data
+  was intact in the app's own log, so the most likely culprit is the test client rather
+  than the server; until that is settled, anywhere text is read **back from the server** is
+  worth a second look.
 
-## 许可
+## Licence
 
-无。自用项目。
+None. A personal project.
