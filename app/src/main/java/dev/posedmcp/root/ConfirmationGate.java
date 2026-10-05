@@ -32,6 +32,13 @@ import dev.posedmcp.state.Prefs;
  * <p>If the answer cannot be collected - no overlay permission and no
  * notification permission - the request is denied rather than allowed. Failing
  * closed is the only safe direction here.
+ *
+ * <p>The one thing that opens all of it at once is <b>hand-off mode</b>, which
+ * is armed by the user in the app and lapses on its own. It is not a
+ * relaxation of a kind - it is the user saying "I am not going to be here to
+ * read these for the next few minutes, go ahead". Everything it lets through
+ * is still logged, marked as auto-approved, so the record of what ran survives
+ * even though the decision did not happen one call at a time.
  */
 public final class ConfirmationGate {
 
@@ -128,12 +135,47 @@ public final class ConfirmationGate {
         }
     }
 
+    /**
+     * Whether a request of this kind would actually raise a dialog right now.
+     *
+     * <p>Distinct from {@link #isRequired}: the policy can ask for a prompt that
+     * hand-off mode then answers on the user's behalf, and a caller that needs
+     * to know whether the user is about to see something has to ask this
+     * instead. It is what the overlay-settle delay keys off.
+     */
+    public static boolean willPrompt(Context ctx, Kind kind) {
+        return Prefs.of(ctx).handoffRemainingMs() <= 0L && isRequired(ctx, kind);
+    }
+
+    /** Hand-off mode's remaining time in words, or empty when it is off. */
+    public static String handoffLeft(Context ctx) {
+        long remaining = Prefs.of(ctx).handoffRemainingMs();
+        if (remaining <= 0L) {
+            return "";
+        }
+        long seconds = remaining / 1000L;
+        return seconds >= 60L ? (seconds / 60L) + " min left" : seconds + "s left";
+    }
+
     public static Decision request(Context ctx, Request req) {
         // An audit line for every prompt: what was asked, and why the asker said
         // it was needed. The dialog is the decision point, so what it displayed
         // is worth keeping.
         Logx.i("confirmation[" + req.kind + "] " + oneLine(req.detail, 160)
                 + " | reason: " + oneLine(req.reason, 160));
+
+        // Hand-off mode, checked before anything else so it covers the two kinds
+        // that no setting can relax. The user armed this deliberately, in the
+        // app, past three warnings and a typed word - but the log line stays,
+        // because "what did it actually run" still has to be answerable
+        // afterwards even when nobody was asked at the time.
+        String left = handoffLeft(ctx);
+        if (!left.isEmpty()) {
+            Logx.i("confirmation[" + req.kind + "] AUTO-APPROVED by hand-off mode (" + left
+                    + "): " + oneLine(req.detail, 200));
+            return new Decision(true, "hand-off mode is armed (" + left
+                    + ") and covers every action, so this was not put to the user");
+        }
 
         if (!isRequired(ctx, req.kind)) {
             return new Decision(true, "confirmation disabled for " + req.kind.name().toLowerCase());

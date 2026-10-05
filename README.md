@@ -23,6 +23,9 @@ the network never leaves `127.0.0.1`.
 | Inject and call code in a third-party app | LSPosed scope + in-memory DEX | yes (can be disabled) |
 | An app process joining the device bridge | the module inside it dials out | **yes, once per package, cannot be disabled** |
 
+One thing overrides every "yes" in that column, for a quarter of an hour at a time and only
+if the user arms it deliberately: **hand-off mode**, below.
+
 ## Three things the design turns on
 
 **One: the confirmation dialog is the only gate.** Every privileged operation raises an
@@ -31,6 +34,10 @@ gave for it. The user approves it by hand, or it does not happen. `root_shell_ex
 be relaxed — that is the whole point of the project: an agent must not run a command the
 user has not read. When the overlay cannot be shown (neither the overlay permission nor
 the notification permission is granted) the call is **refused**, not allowed through.
+
+There is exactly one exception, and it is a decision the user makes rather than a setting:
+**hand-off mode** hands the whole gate over for a fixed, self-expiring window. What it is
+for, what it costs, and why it is built the way it is are [below](#hand-off-mode-the-gate-off-on-purpose).
 
 **Two: there are no automatic fallback chains.** Which tools go through a shell and which
 use the module's platform access is spelled out explicitly. Otherwise a relaxed setting
@@ -122,6 +129,45 @@ their confirmation turned off.
 **`root_shell_exec` always prompts and cannot be turned off.** That is deliberate: what
 gets relaxed is the module/accessibility route, and the real privilege boundary does not
 disappear because of a setting.
+
+### Hand-off mode: the gate, off on purpose
+
+Everything above assumes the user is there to read each prompt. Hand-off mode is for when
+they deliberately are not — the agent is working through a long sequence and nobody wants
+to tap Allow forty times, or the phone is being driven from across the room.
+
+While it is armed, **every** kind of request is answered on the user's behalf, including
+the two that no setting can relax: the root shell and the bridge trust decision. No dialog
+appears at all.
+
+What that costs is worth being blunt about. That dialog is not a formality — it is the only
+thing that has ever stood between an agent and this device. A command that deletes files,
+disables a system component or writes to a partition runs exactly as the agent typed it,
+and a phone left unable to boot is not something this app can undo.
+
+So it is built to be hard to open, and hard to leave open by accident:
+
+- **It is not a switch.** Arming it means three dialogs, each naming a different
+  consequence, and then typing `HANDOFF` into a field before the button even enables. A
+  pocket, a mis-tap or a stray touch cannot open this; only a person reading it can.
+- **It expires.** Fifteen minutes by default, extendable five at a time, deliberately and
+  by hand. There is no "always on".
+- **A restart clears it.** Turning the service off and on, or rebooting, ends the session.
+  It is armed for a sitting, not configured.
+- **It says so, in three places.** The status tab counts down; the permanent notification
+  carries the remaining time; and `module_status` reports it to the agent in full, because
+  an agent that does not know it is running ungated will misjudge how much care its next
+  call needs.
+- **Everything is still logged.** Each auto-approval writes an audit line naming the action
+  and the time left. The decision is skipped; the record is not:
+
+  ```
+  W PosEdMCP: HAND-OFF MODE ARMED for 15 min - every tool now runs without asking
+  I PosEdMCP: confirmation[SHELL] AUTO-APPROVED by hand-off mode (14 min left): id
+  ```
+
+And the thing it does not change: **only the user can arm it.** There is no tool for it,
+so an agent cannot widen its own authority, and the prompt tells it so.
 
 ### Root availability
 
@@ -571,15 +617,30 @@ Zygisk-LSPosed 1.10.2 (7182):
 - **The Hooks page**: grouped by app, collapsed by default, expanding into the second level
   to list `DEX · RULE` / `DEX · LUA`, the target method, a text description and
   `last armed <time>`, with a switch and a delete button
+- **Real use, by the person who built it**: twelve Lua hooks on `com.coolapk.market` removing
+  its ads — collapsing feed ad cards to zero height, dropping the embedded sponsor cards out
+  of a post, closing the splash and interstitial activities on creation — registered through
+  `hook_lua` and re-armed in every Coolapk process since
+- **Hand-off mode, end to end**: the three warnings and the typed word (the arm button stays
+  disabled for the wrong word and enables for the right one); arming it; the live countdown
+  on the status tab; **`root_shell_exec` — the tool that otherwise always prompts — returning
+  `uid=0` in 103 ms with no dialog**; `module_status` reporting `HAND_OFF_MODE` to the agent
+  with the time left; the audit lines above; turning it off restoring the gate; and a service
+  restart clearing it
 
 ### Not yet verified
 
-- **The registration paths of the `hook_method` / `hook_lua` tools themselves** (and the
-  Hooks page's delete button) have not been through a full round: they raise a confirmation
-  dialog, so they need a human to tap Allow once. The verifications above went through
-  **the same** save → re-arm path, with the definition written in as a file.
-- A Lua hook's `set_result` / `set_arg` / `set_field` — the half that actually **changes**
-  behaviour rather than observing it — has not been run on the device yet.
+- **Hand-off mode's expiry has not been watched to the end.** Everything around it was: the
+  countdown ticks, `module_status` flips on the same comparison, and a restart clears it. But
+  sitting on an open gate for a full fifteen minutes to watch the timer reach zero is not a
+  good trade, so that last step is reasoned rather than observed.
+- **A Lua hook's `set_result` / `set_arg` / `set_field` has no dedicated test.** The half that
+  actually *changes* behaviour rather than observing it is plainly in use — several of the
+  Coolapk effects are behavioural, and returning nil from `getDetailSponsorCard` cannot be
+  done by observing — but this session verified it through that use rather than by a test of
+  its own.
+- The Hooks page's delete button, and `hook_method`'s registration path, have not been
+  through a full round; `hook_lua`'s has, via the Coolapk hooks above.
 - The accessibility routes for `ui_dump` / `screen_capture` / `input_inject` are
   implemented, compiled and wired up, but have not been through a full round on a real
   device (each one needs a human to tap the confirmation dialog). Root-free UI automation

@@ -10,16 +10,22 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.text.Editable;
+import android.text.InputType;
+import android.text.TextWatcher;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.Button;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.google.android.material.appbar.MaterialToolbar;
@@ -73,6 +79,30 @@ public class MainActivity extends AppCompatActivity {
     private FrameLayout tabContent;
     /** Which apps are open on the hook page. Collapsed by default. */
     private final java.util.Set<String> expandedApps = new java.util.LinkedHashSet<>();
+
+    /** The word the user has to type to arm hand-off mode. */
+    private static final String HANDOFF_WORD = "HANDOFF";
+
+    /** Ticks the hand-off countdown while the status tab is on screen. */
+    private final android.os.Handler ui =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+    private TextView handoffStatus;
+
+    private final Runnable handoffTick = new Runnable() {
+        @Override
+        public void run() {
+            if (prefs.handoffRemainingMs() <= 0L) {
+                // It just lapsed. Redraw the tab rather than leave the page
+                // claiming a mode that is over.
+                renderStatus();
+                return;
+            }
+            if (handoffStatus != null) {
+                handoffStatus.setText(handoffLine());
+            }
+            ui.postDelayed(this, 1000L);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -145,6 +175,13 @@ public class MainActivity extends AppCompatActivity {
         renderStatus();
         renderScripts();
         renderHooks();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        // Nothing on screen to count down for.
+        ui.removeCallbacks(handoffTick);
     }
 
     private void selectTab(int index) {
@@ -258,6 +295,9 @@ public class MainActivity extends AppCompatActivity {
         statusContent.addView(toggle("Start automatically after reboot", prefs.autostart(),
                 checked -> prefs.setAutostart(checked)));
 
+        statusContent.addView(section("HAND-OFF MODE"));
+        renderHandoff();
+
         statusContent.addView(section("TOOLS"));
         statusContent.addView(body("Read-only tools never prompt. Everything else asks the user"
                 + " before it runs."));
@@ -278,6 +318,170 @@ public class MainActivity extends AppCompatActivity {
             sb.append(pad(tool.name, 20)).append(kind).append('\n');
         }
         return sb.toString().trim();
+    }
+
+    // ---- hand-off mode -----------------------------------------------------
+
+    /**
+     * The one control that removes the gate, and it is built to be hard to open.
+     *
+     * <p>Everything else in this app is a setting; this is the user standing up
+     * and saying "I will not be reading these for a while". So it is not a
+     * switch that can be brushed in a pocket: three dialogs that each name a
+     * different consequence, then a word to type. Past that it still expires on
+     * its own, because the expensive failure here is not opening it - it is
+     * forgetting it is open.
+     */
+    private void renderHandoff() {
+        if (prefs.handoffRemainingMs() > 0L) {
+            handoffStatus = title(handoffLine());
+            handoffStatus.setTextColor(color(androidx.appcompat.R.attr.colorError));
+            statusContent.addView(handoffStatus);
+            statusContent.addView(body("Every tool the agent calls is running the moment it is"
+                    + " asked for, with nothing checking it first - root shell commands"
+                    + " included. It switches itself off when the time runs out, and restarting"
+                    + " the service clears it."));
+
+            LinearLayout actions = row();
+            actions.addView(tonalButton("Extend " + (Prefs.HANDOFF_EXTEND_MS / 60_000L) + " min",
+                    v -> extendHandoff()));
+            actions.addView(filledButton("Turn off now", v -> turnOffHandoff()));
+            statusContent.addView(actions);
+
+            ui.removeCallbacks(handoffTick);
+            ui.postDelayed(handoffTick, 500L);
+            return;
+        }
+
+        handoffStatus = null;
+        statusContent.addView(body("The approval dialog is the only thing standing between the"
+                + " agent and this device. Hand-off mode takes it away: for a while, every"
+                + " action runs the moment it is asked for."));
+        statusContent.addView(body("It is for the case where you are deliberately letting the"
+                + " agent work through a long sequence without you. It is also the mode that can"
+                + " leave the phone unbootable, so it expires by itself and there is no way to"
+                + " make it stick - only to arm it again."));
+        statusContent.addView(outlinedButton("Arm hand-off mode…", v -> handoffWarningOne()));
+    }
+
+    private String handoffLine() {
+        long remaining = Math.max(0L, prefs.handoffRemainingMs());
+        long minutes = remaining / 60_000L;
+        long seconds = (remaining % 60_000L) / 1000L;
+        return "ON — " + minutes + ":" + (seconds < 10 ? "0" : "") + seconds + " left";
+    }
+
+    private void handoffWarningOne() {
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("Hand-off mode: no more prompts")
+                .setMessage("While this is on, everything the agent calls runs immediately."
+                        + " Root shell commands, injected taps and text, code loaded into other"
+                        + " apps, screenshots of whatever is on screen - none of it will ask you"
+                        + " first.")
+                .setPositiveButton("I understand", (d, w) -> handoffWarningTwo())
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void handoffWarningTwo() {
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("That includes root")
+                .setMessage("The root shell is the one thing that could never be switched off,"
+                        + " on purpose - it is why this project exists at all. Hand-off mode"
+                        + " covers it too.")
+                .setPositiveButton("I understand", (d, w) -> handoffWarningThree())
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void handoffWarningThree() {
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("This can break the phone")
+                .setMessage("A command that deletes files, disables a system component or"
+                        + " writes to a partition will run exactly as the agent typed it, with"
+                        + " nothing in between. That can leave this device unable to boot, and"
+                        + " there is no undo - the audit log records what ran, but it cannot put"
+                        + " anything back.")
+                .setPositiveButton("I understand", (d, w) -> handoffTypedConfirmation())
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void handoffTypedConfirmation() {
+        LinearLayout box = column();
+        box.setPadding(dp(24), 0, dp(24), 0);
+        box.addView(body("Type " + HANDOFF_WORD + " below to enable the button. A pocket, a"
+                + " mis-tap or a stray touch cannot do this - only you, reading this, can."));
+
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setHint(HANDOFF_WORD);
+        input.setInputType(InputType.TYPE_CLASS_TEXT);
+        int pad = dp(12);
+        input.setPadding(pad, pad, pad, pad);
+        box.addView(input);
+
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle("Type " + HANDOFF_WORD + " to arm it")
+                .setView(box)
+                .setPositiveButton("Arm for " + (Prefs.HANDOFF_DEFAULT_MS / 60_000L) + " min",
+                        (d, w) -> armHandoff())
+                .setNegativeButton("Cancel", null)
+                .create();
+
+        dialog.setOnShowListener(shown -> {
+            Button arm = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            arm.setEnabled(false);
+            input.addTextChangedListener(new TextWatcher() {
+                @Override
+                public void beforeTextChanged(CharSequence s, int a, int b, int c) {
+                }
+
+                @Override
+                public void onTextChanged(CharSequence s, int a, int b, int c) {
+                }
+
+                @Override
+                public void afterTextChanged(Editable s) {
+                    arm.setEnabled(HANDOFF_WORD.equalsIgnoreCase(s.toString().trim()));
+                }
+            });
+        });
+        dialog.show();
+    }
+
+    private void armHandoff() {
+        McpService service = McpService.instance();
+        if (service == null || !service.isRunning()) {
+            toast("Start the service first");
+            return;
+        }
+        service.armHandoff(Prefs.HANDOFF_DEFAULT_MS);
+        toast("Hand-off armed for " + (Prefs.HANDOFF_DEFAULT_MS / 60_000L) + " minutes");
+        renderStatus();
+    }
+
+    private void extendHandoff() {
+        McpService service = McpService.instance();
+        if (service == null || !service.isRunning()) {
+            toast("Start the service first");
+            return;
+        }
+        long total = Math.max(0L, prefs.handoffRemainingMs()) + Prefs.HANDOFF_EXTEND_MS;
+        service.armHandoff(total);
+        toast("Extended - " + (total / 60_000L) + " minutes left");
+        renderStatus();
+    }
+
+    private void turnOffHandoff() {
+        McpService service = McpService.instance();
+        if (service != null && service.isRunning()) {
+            service.disarmHandoff();
+        } else {
+            prefs.clearHandoff();
+        }
+        toast("Hand-off off - prompts are back");
+        renderStatus();
     }
 
     // ---- scripts tab -------------------------------------------------------

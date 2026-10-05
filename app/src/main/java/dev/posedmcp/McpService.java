@@ -47,11 +47,32 @@ public final class McpService extends Service {
     private static final int NOTIFICATION_ID = 4100;
     /** How long a refusal is remembered, so a rejected app cannot spam prompts. */
     private static final long REFUSAL_MEMORY_MS = 10 * 60 * 1000L;
+    /** How often the notification's hand-off countdown is refreshed. */
+    private static final long HANDOFF_TICK_MS = 30_000L;
 
     private static volatile McpService instance;
 
     private final AtomicBoolean started = new AtomicBoolean(false);
     private final java.util.Map<String, Long> refusedPeers = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private final android.os.Handler handler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+    private boolean handoffWasArmed;
+
+    private final Runnable handoffTicker = new Runnable() {
+        @Override
+        public void run() {
+            boolean armed = !ConfirmationGate.handoffLeft(McpService.this).isEmpty();
+            // Refreshed while it is armed so the countdown stays roughly honest,
+            // and once more when it lapses so the notification stops claiming a
+            // mode that is over.
+            if (armed || armed != handoffWasArmed) {
+                handoffWasArmed = armed;
+                updateNotification();
+            }
+            handler.postDelayed(this, HANDOFF_TICK_MS);
+        }
+    };
 
     private Prefs prefs;
     private EventStore events;
@@ -86,6 +107,15 @@ public final class McpService extends Service {
         HiddenApi.exempt();
         // Synchronously, before anything can read a token or start a listener.
         prefs.ensureTokens();
+        // Hand-off mode never survives the service going down. It is armed for a
+        // sitting, in front of a user who is right there; a restart means they
+        // are not, and a window nobody remembers opening is the exact failure
+        // this mode has to avoid. Clearing here also covers a reboot, since the
+        // service comes back up with the device.
+        if (prefs.handoffUntil() != 0L) {
+            Logx.i("hand-off mode cleared: the service restarted");
+            prefs.clearHandoff();
+        }
         // Mirror the bridge credentials where hooked processes can reach them.
         BridgeCredentials.publish(this, prefs.bridgeToken(), prefs.bridgePort());
         ensureChannel();
@@ -139,6 +169,9 @@ public final class McpService extends Service {
             // Runs 'su -c id' once, now, so no agent-triggered call can reach
             // root outside the confirmation gate.
             DeviceStatus.probeRootAsync();
+            handler.removeCallbacks(handoffTicker);
+            handoffWasArmed = false;
+            handler.postDelayed(handoffTicker, HANDOFF_TICK_MS);
 
             Logx.i("service started: MCP on " + prefs.mcpPort() + ", bridge on " + prefs.bridgePort());
         } catch (Throwable t) {
@@ -149,6 +182,7 @@ public final class McpService extends Service {
 
     private synchronized void shutdown() {
         started.set(false);
+        handler.removeCallbacks(handoffTicker);
         try {
             if (mcp != null) {
                 mcp.stop();
@@ -327,6 +361,42 @@ public final class McpService extends Service {
         }
     }
 
+    // ---- hand-off mode ----------------------------------------------------
+
+    /**
+     * Arms hand-off mode for a duration; the user did the ceremony in the app.
+     *
+     * <p>Logged at warn level on purpose. This is the only event in the whole
+     * system that removes the gate, and it should be findable in a log by
+     * someone asking "what happened on this device at 14:20".
+     */
+    public void armHandoff(long durationMs) {
+        if (prefs == null) {
+            return;
+        }
+        prefs.setHandoffUntil(System.currentTimeMillis() + durationMs);
+        Logx.w("HAND-OFF MODE ARMED for " + (durationMs / 60_000L) + " min - every tool now"
+                + " runs without asking");
+        handoffWasArmed = false;
+        updateNotification();
+    }
+
+    /** Ends hand-off mode now, whatever time was left. */
+    public void disarmHandoff() {
+        if (prefs == null) {
+            return;
+        }
+        prefs.clearHandoff();
+        Logx.i("hand-off mode turned off");
+        handoffWasArmed = false;
+        updateNotification();
+    }
+
+    /** Pushes the notification up to date after the UI changed something. */
+    public void refreshNotification() {
+        updateNotification();
+    }
+
     /** The registered tools, so the status tab lists what actually exists. */
     public List<McpTool> tools() {
         ToolRegistry registry = tools;
@@ -371,9 +441,11 @@ public final class McpService extends Service {
         if (nm == null) {
             return;
         }
+        String handoff = ConfirmationGate.handoffLeft(this);
         String status = "127.0.0.1:" + mcpPort() + " · "
                 + (systemBridgeConnected() ? "system bridge ok" : "system bridge offline")
-                + " · " + connectedPeers() + " peer(s)";
+                + " · " + connectedPeers() + " peer(s)"
+                + (handoff.isEmpty() ? "" : " · HAND-OFF " + handoff);
         try {
             nm.notify(NOTIFICATION_ID, buildNotification(status));
         } catch (Throwable ignored) {

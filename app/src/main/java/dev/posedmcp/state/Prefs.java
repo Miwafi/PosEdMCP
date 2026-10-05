@@ -26,9 +26,15 @@ public final class Prefs {
     private static final String KEY_CONFIRM_TIMEOUT = "confirm_timeout_ms";
     private static final String KEY_EXEC_TIMEOUT = "exec_timeout_ms";
     private static final String KEY_AUTOSTART = "autostart";
+    private static final String KEY_HANDOFF_UNTIL = "handoff_until";
 
     public static final int DEFAULT_MCP_PORT = 8765;
     public static final int DEFAULT_BRIDGE_PORT = 8766;
+
+    /** How long hand-off mode lasts when it is armed. */
+    public static final long HANDOFF_DEFAULT_MS = 15 * 60 * 1000L;
+    /** How much each "extend" adds. */
+    public static final long HANDOFF_EXTEND_MS = 5 * 60 * 1000L;
 
     private final SharedPreferences sp;
 
@@ -131,6 +137,45 @@ public final class Prefs {
 
     public long execTimeoutMs() {
         return sp.getLong(KEY_EXEC_TIMEOUT, 60_000L);
+    }
+
+    // ---- hand-off mode ----------------------------------------------------
+
+    /**
+     * When hand-off mode lapses, as a wall-clock time, or 0 when it is off.
+     *
+     * <p>Wall clock rather than {@code elapsedRealtime}: that counter restarts
+     * at zero on every boot, so a deadline saved as "5 minutes after boot"
+     * would, after a reboot, sit thousands of seconds in the future and quietly
+     * re-arm a mode the user thought had been cleared. Hand-off mode is the one
+     * setting where that matters, so it is the one that avoids the trap.
+     *
+     * <p>Only this app process reads it: the gate lives here, not in the module.
+     */
+    public long handoffUntil() {
+        return sp.getLong(KEY_HANDOFF_UNTIL, 0L);
+    }
+
+    /**
+     * Arms hand-off mode until the deadline.
+     *
+     * <p>{@code commit()} rather than {@code apply()}: the very next tool call
+     * reads this back, and a value still sitting in a background write queue is
+     * a value the gate would not see.
+     */
+    public void setHandoffUntil(long epochMillis) {
+        sp.edit().putLong(KEY_HANDOFF_UNTIL, epochMillis).commit();
+    }
+
+    /** Ends hand-off mode now. */
+    public void clearHandoff() {
+        sp.edit().remove(KEY_HANDOFF_UNTIL).commit();
+    }
+
+    /** Milliseconds of hand-off mode left; 0 or less when it is off or lapsed. */
+    public long handoffRemainingMs() {
+        long until = handoffUntil();
+        return until <= 0L ? 0L : until - System.currentTimeMillis();
     }
 
     public boolean autostart() {

@@ -1397,7 +1397,7 @@ public final class ToolRegistry {
 
     private void requireConfirmation(ConfirmationGate.Kind kind, String title, String detail,
             String reason) throws McpTool.ToolError {
-        boolean willPrompt = ConfirmationGate.isRequired(context, kind);
+        boolean willPrompt = ConfirmationGate.willPrompt(context, kind);
         ConfirmationGate.Decision decision = ConfirmationGate.request(context,
                 new ConfirmationGate.Request(kind, title, detail, reason, requester(),
                         prefs.confirmTimeoutMs()));
@@ -1488,6 +1488,16 @@ public final class ToolRegistry {
             o.put("plugin_load/plugin_invoke", prefs.confirmPlugin() ? "prompts" : "not prompted");
             o.put("lua_exec", prefs.confirmPlugin() ? "prompts" : "not prompted");
             o.put("confirmTimeoutMs", prefs.confirmTimeoutMs());
+
+            // Stated last and in full, because it overrides every line above it
+            // and an agent that does not know it is running ungated will
+            // misjudge how much care its next call needs.
+            String left = ConfirmationGate.handoffLeft(context);
+            if (!left.isEmpty()) {
+                o.put("HAND_OFF_MODE", "ARMED - " + left + ". Nothing is being put to the"
+                        + " user; every action runs as soon as it is asked for, including"
+                        + " root shell commands. Only the user can arm this, from the app.");
+            }
         } catch (Throwable ignored) {
         }
         return o;
