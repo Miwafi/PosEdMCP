@@ -78,6 +78,9 @@ public final class LuaRuntime {
     private static final int MAX_ARRAY_ENTRIES = 100_000;
     public static final int DB_ROW_LIMIT = 200;
 
+    /** One native read at a time; a stray address is fatal either way, but a huge one is slow too. */
+    private static final int MAX_NATIVE_READ = 4096;
+
     /** Every SQLite file starts with this, NUL included. */
     private static final byte[] SQLITE_MAGIC =
             "SQLite format 3\u0000".getBytes(StandardCharsets.US_ASCII);
@@ -283,6 +286,8 @@ public final class LuaRuntime {
         }));
 
         host.set("db", fn(a -> openDatabase(a.checkjstring(1), databases)));
+
+        host.set("native", nativeApi());
 
         host.set("log", fn(a -> {
             String text = a.narg() > 0 ? a.arg(1).tojstring() : "";
@@ -598,6 +603,150 @@ public final class LuaRuntime {
             }
         }
         return sb.toString();
+    }
+
+    // ---- native ------------------------------------------------------------
+
+    /**
+     * The native half: what the Java layer cannot reach.
+     *
+     * <p>Handles, addresses and returned words are <em>hex strings</em>, not
+     * numbers. Lua's numbers are doubles here, so a pointer survives the trip
+     * into Lua only if it happens to fit in 53 bits - one did not, came back
+     * four bytes off, and took the target process down with it at the next
+     * dlsym. A string is exact, prints readably, and makes the representation
+     * obvious rather than implicit.
+     *
+     * <p>Arguments and results are machine words, so this calls integer and
+     * pointer functions only: a function taking or returning a float, a double
+     * or a struct by value has no representation here. Reading or writing a bad
+     * address is fatal to the target process, which is the nature of reaching
+     * into another program's memory rather than something to guard against.
+     */
+    private static LuaTable nativeApi() {
+        LuaTable api = new LuaTable();
+        api.set("status", fn(a -> LuaValue.valueOf(NativeRuntime.status())));
+        api.set("error", fn(a -> LuaValue.valueOf(NativeRuntime.lastError())));
+        api.set("probe", fn(a -> {
+            requireNative();
+            return LuaValue.valueOf(NativeRuntime.probe());
+        }));
+        api.set("open", fn(a -> {
+            requireNative();
+            int id = NativeRuntime.openLibrary(a.checkjstring(1));
+            // An ordinary miss, like app.class: nil, with error() saying why.
+            return id == 0 ? LuaValue.NIL : LuaValue.valueOf(id);
+        }));
+        api.set("symbol", fn(a -> {
+            requireNative();
+            int id = a.arg(1).isnil() ? 0 : a.arg(1).toint();
+            long address = NativeRuntime.findSymbol(id, a.checkjstring(2));
+            return address == 0 ? LuaValue.NIL : LuaValue.valueOf(hex(address));
+        }));
+        api.set("call", fn(a -> {
+            requireNative();
+            int arity = Math.max(0, a.narg() - 1);
+            if (arity > 6) {
+                throw new LuaError("app.native.call takes at most six arguments, got " + arity);
+            }
+            long[] arguments = new long[6];
+            for (int i = 0; i < arity; i++) {
+                arguments[i] = word(a.arg(2 + i));
+            }
+            long result = NativeRuntime.call(address(a.arg(1)), arity, arguments[0], arguments[1],
+                    arguments[2], arguments[3], arguments[4], arguments[5]);
+            return LuaValue.valueOf(hex(result));
+        }));
+        api.set("add", fn(a -> LuaValue.valueOf(hex(address(a.arg(1)) + word(a.arg(2))))));
+        api.set("number", fn(a -> {
+            // The exact value, or nothing: silently rounding a 64-bit address into
+            // a double is how the pointer above got corrupted in the first place.
+            long value = address(a.arg(1));
+            double asDouble = (double) value;
+            return (long) asDouble == value
+                    ? LuaValue.valueOf(value) : LuaValue.NIL;
+        }));
+        api.set("read", fn(a -> {
+            requireNative();
+            int length = a.arg(2).toint();
+            if (length <= 0 || length > MAX_NATIVE_READ) {
+                throw new LuaError("app.native.read takes a length between 1 and "
+                        + MAX_NATIVE_READ + ", got " + length);
+            }
+            byte[] bytes = NativeRuntime.readMemory(address(a.arg(1)), length);
+            if (bytes == null) {
+                throw new LuaError("nothing read from that address");
+            }
+            LuaTable out = new LuaTable();
+            for (int i = 0; i < bytes.length; i++) {
+                out.set(i + 1, LuaValue.valueOf(bytes[i] & 0xFF));
+            }
+            return out;
+        }));
+        api.set("write", fn(a -> {
+            requireNative();
+            LuaValue bytes = a.arg(2);
+            if (!bytes.istable()) {
+                throw new LuaError("app.native.write takes a table of byte values");
+            }
+            int length = bytes.length();
+            byte[] out = new byte[length];
+            for (int i = 0; i < length; i++) {
+                out[i] = (byte) (bytes.get(i + 1).toint() & 0xFF);
+            }
+            return LuaValue.valueOf(NativeRuntime.writeMemory(address(a.arg(1)), out));
+        }));
+        api.set("string", fn(a -> {
+            requireNative();
+            int max = a.narg() > 1 ? a.arg(2).toint() : 256;
+            byte[] bytes = NativeRuntime.readMemory(address(a.arg(1)),
+                    Math.min(max, MAX_NATIVE_READ));
+            if (bytes == null) {
+                throw new LuaError("nothing read from that address");
+            }
+            int end = 0;
+            while (end < bytes.length && bytes[end] != 0) {
+                end++;
+            }
+            return LuaValue.valueOf(new String(bytes, 0, end, StandardCharsets.ISO_8859_1));
+        }));
+        return api;
+    }
+
+    private static String hex(long value) {
+        return "0x" + Long.toHexString(value);
+    }
+
+    /** Accepts "0x…", plain hex, or a number, so a literal is still convenient. */
+    private static long address(LuaValue value) {
+        if (value == null || value.isnil()) {
+            return 0;
+        }
+        if (value.isnumber()) {
+            return value.tolong();
+        }
+        String text = value.checkjstring().trim();
+        if (text.isEmpty() || "0".equals(text)) {
+            return 0;
+        }
+        try {
+            return Long.parseUnsignedLong(text.startsWith("0x") ? text.substring(2) : text, 16);
+        } catch (NumberFormatException e) {
+            throw new LuaError("not an address or a number: " + text);
+        }
+    }
+
+    /** An argument of a native call: a word, from a hex string or a number. */
+    private static long word(LuaValue value) {
+        return value.isnumber() ? value.tolong() : address(value);
+    }
+
+    /** @throws LuaError when the library could not be loaded, saying why */
+    private static void requireNative() {
+        String problem = NativeRuntime.ensureLoaded();
+        if (problem != null) {
+            throw new LuaError(problem);
+        }
     }
 
     // ---- databases ---------------------------------------------------------

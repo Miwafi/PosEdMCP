@@ -118,12 +118,18 @@ public final class AppHost {
             // Logic, rather than a single call. The interpreter is part of this
             // module, so it is already here in the target process - nothing is
             // compiled and nothing is pushed over the bridge.
-            bridge.registerHandler("lua_exec", args -> LuaRuntime.exec(
-                    packageName,
-                    appClassLoader,
-                    currentApplication(),
-                    args.optString("source", ""),
-                    args.optLong("max_instructions", LuaRuntime.DEFAULT_MAX_INSTRUCTIONS)));
+            bridge.registerHandler("lua_exec", args -> {
+                // Only the app it belongs to knows where the module APK is, and
+                // only the module needs it - to load its own native library from
+                // inside someone else's process.
+                NativeRuntime.setModuleApk(args.optString("module_apk", ""));
+                return LuaRuntime.exec(
+                        packageName,
+                        appClassLoader,
+                        currentApplication(),
+                        args.optString("source", ""),
+                        args.optLong("max_instructions", LuaRuntime.DEFAULT_MAX_INSTRUCTIONS));
+            });
             bridge.registerHandler("ping", args -> new JSONObject().put("pong", true)
                     .put("hooks", HookRegistry.snapshot().size()));
             bridge.start();

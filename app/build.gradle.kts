@@ -5,6 +5,7 @@ plugins {
 android {
     namespace = "dev.posedmcp"
     compileSdk = 36
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         applicationId = "dev.posedmcp"
@@ -12,6 +13,19 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0.0"
+
+        // Only the ABI the module is used on. The library is small, but the APK
+        // is loaded into every scoped process, so there is no reason to carry
+        // three copies of it.
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+        }
     }
 
     buildTypes {

@@ -226,6 +226,46 @@ GitHub 应用的探针正是这样得出「这个应用没登录」的结论，�
 
 smali 那条路保留：`invoke_method` 和 Lua 都表达不了的**结构性**改动仍然得走它。
 
+## 注入到 native 层
+
+`app.native` 把代码往下一层推进：目标进程里的原生代码。模块本身就是从目标应用进程里运行的，
+所以它加载的 .so 就活在那个进程的地址空间里，够得到 Java 够不到的东西——应用自己的 .so、
+libc、以及任何符号名能解析到的地方。
+
+```
+app.native.status()           用了哪条加载路径，或为什么不可用
+app.native.probe()            自检
+app.native.open(path)         dlopen，返回一个小整数 id；失败返回 nil
+app.native.symbol(id, name)   dlsym，返回地址（"0x…"）；失败返回 nil
+app.native.call(addr, ...)    调用函数指针（最多六个参数）
+app.native.read(addr, len)    读内存，返回字节表
+app.native.write(addr, bytes) 写内存
+app.native.string(addr[, max]) 读 C 字符串
+app.native.error()            上一次 dlopen/dlsym 的错误
+```
+
+**几个必须知道的设计取舍：**
+
+- **地址是十六进制字符串，不是数字。** Lua 的数字在这里是 double，指针只有落在 53 位以内
+  才能原样往返——实测有一个没有，回来差了四个字节，下一次 `dlsym` 就把目标进程打挂了。
+  字符串是精确的，而且打印出来就能读。要用数值比大小就用 `app.native.number("0x…")`，
+  它只在能精确表示时返回值，否则给 nil——而不是悄悄四舍五入。
+- **dlopen 句柄不离开 native 层。** 这台设备上句柄不总是地址：非默认命名空间里的库拿到的是
+  linker 内部表的合成值。把它发到 Java、Lua 再传回来会让 `dlsym` 在 linker 自己的命名空间
+  查找里崩掉，所以调用方拿到的是一个小 id，真实句柄留在 C 侧的表里。
+- **参数和返回值是机器字**，所以这里只调整数/指针函数：浮点、double、结构体按值传递都无法
+  表达。这是只传字长的桥的固有边界，不是以后能补上的。
+- **读写坏地址会直接带走目标进程。** 这就是伸手进别人内存的本质，不做兜底。脚本要读之前
+  先想清楚地址从哪来。
+
+**.so 是怎么进去的：** 模块 APK 里带着 `lib/arm64-v8a/libposednative.so`，在目标进程里用
+`<apk>!/lib/<abi>/lib.so` 这个形式 `System.load`——Android 的 linker 认这种写法，而 APK 所在
+的文件上下文是应用可以执行的，所以不需要往任何地方写文件。**实测确认可行**（nativeloader
+日志：`Load …base.apk!/lib/arm64-v8a/libposednative.so using isolated ns … : ok`）。
+
+> 模块无法自己找到这个路径：它的类加载器给不出 code source，PackageManager 又看不到它不属于
+> 的应用。**由本应用通过桥把路径告诉它。**
+
 ## 架构
 
 ```
@@ -305,6 +345,8 @@ ContentProvider——能通就用，省掉一次弹窗。
 - **自动化页的 Run 要求无障碍服务在运行**，理由见上：它会把你切到目标应用，本应用于是
   在后台，而没有无障碍绑定就会被系统冻结、运行永远完不成。无障碍关闭时页面会直接说明，
   不会把它伪装成脚本失败。
+- **`app.native` 读/写坏地址会连带杀死目标应用。** 这是直接操作别人进程内存的固有代价，
+  没有兜底；脚本拿到的地址从哪来，决定了它有多危险。
 - **`lua_exec` 的指令预算只约束 Lua 本身。** 脚本如果把时间花在慢的 Java 调用上（网络、
   文件），预算不会触发，只能靠桥的请求超时兜底——而超时后脚本所在线程仍会把当前调用跑完，
   这一点和 `plugin_invoke` 一样。

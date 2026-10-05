@@ -829,6 +829,13 @@ public final class ToolRegistry {
                         + " rows and marks the result truncated when there were more; use LIMIT"
                         + " and OFFSET to page. This is usually the fastest way to understand an"
                         + " obfuscated app: what it stores says more than its renamed classes do."
+                        + " \n  app.native - native code in the target process: open(path) to"
+                        + " dlopen, symbol(id, name) to dlsym, call(address, ...) for up to six"
+                        + " word arguments, read/write/string for memory, and status()/error()."
+                        + " Addresses are \"0x...\" strings, not numbers: Lua numbers are doubles"
+                        + " here and a pointer does not survive them. Arguments and results are"
+                        + " machine words, so float or struct arguments cannot be expressed. A"
+                        + " bad address takes the target process down."
                         + " \n  app.log(text) - into the module log"
                         + " \nThere is no io and no os library; file access goes through"
                         + " app.files and app.read, and databases through app.db, all of which"
@@ -1186,6 +1193,9 @@ public final class ToolRegistry {
         JSONObject callArgs = new JSONObject();
         callArgs.put("source", source);
         callArgs.put("max_instructions", maxInstructions);
+        // Where the module can find its own APK, for loading the native library
+        // inside the target process.
+        callArgs.put("module_apk", context.getApplicationInfo().sourceDir);
         JSONObject out = capabilities.appCall(pkg, "lua_exec", callArgs, 30_000L);
         out.put("package", pkg);
         return out;
