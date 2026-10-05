@@ -42,6 +42,7 @@ public final class BridgeServer {
     private final String token;
     private final EventStore events;
     private final TrustDecider trustDecider;
+    private final PeerListener peerListener;
 
     private final Map<String, Peer> peers = new ConcurrentHashMap<>();
     /**
@@ -63,11 +64,29 @@ public final class BridgeServer {
         boolean isTrusted(String pkg);
     }
 
+    /**
+     * Told when a module process has finished connecting.
+     *
+     * <p>Called on a thread of its own, and that is the point: whatever handles
+     * this usually sends a request straight back to the peer, and the thread
+     * that accepted the connection is about to become that peer's read loop. A
+     * request sent from there would wait for a reply nothing was reading.
+     */
+    public interface PeerListener {
+        void onPeerReady(String pkg, String peerKey);
+    }
+
     public BridgeServer(int port, String token, EventStore events, TrustDecider trustDecider) {
+        this(port, token, events, trustDecider, null);
+    }
+
+    public BridgeServer(int port, String token, EventStore events, TrustDecider trustDecider,
+            PeerListener peerListener) {
         this.port = port;
         this.token = token;
         this.events = events;
         this.trustDecider = trustDecider;
+        this.peerListener = peerListener;
     }
 
     public int port() {
@@ -309,6 +328,20 @@ public final class BridgeServer {
             events.add(key, "peer.connected", new JSONObject().put("role", role).put("pkg", pkg),
                     System.currentTimeMillis());
             Logx.i("bridge peer connected: " + key);
+
+            if (peerListener != null && Wire.ROLE_APP.equals(role)) {
+                String readyPkg = pkg;
+                String readyKey = key;
+                Thread t = new Thread(() -> {
+                    try {
+                        peerListener.onPeerReady(readyPkg, readyKey);
+                    } catch (Throwable t2) {
+                        Logx.w("peer-ready handler failed for " + readyKey + ": " + t2);
+                    }
+                }, "posedmcp-peer-ready");
+                t.setDaemon(true);
+                t.start();
+            }
 
             readLoop(peer, in);
         } catch (Throwable t) {

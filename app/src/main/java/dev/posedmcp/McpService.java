@@ -28,7 +28,9 @@ import dev.posedmcp.state.DeviceStatus;
 import dev.posedmcp.state.EventStore;
 import dev.posedmcp.state.PeerTrust;
 import dev.posedmcp.state.Prefs;
+import dev.posedmcp.state.SavedHook;
 import dev.posedmcp.tools.Capabilities;
+import dev.posedmcp.tools.HookDeploy;
 
 /**
  * Keeps the MCP endpoint and the device bridge alive.
@@ -125,7 +127,7 @@ public final class McpService extends Service {
             AccessibilityBridge.setEventSink((type, data) ->
                     events.add("a11y", type, data, System.currentTimeMillis()));
             bridge = new BridgeServer(prefs.bridgePort(), prefs.bridgeToken(), events,
-                    this::trustPeer);
+                    this::trustPeer, this::onPeerReady);
             bridge.start();
 
             Capabilities capabilities = new Capabilities(this, bridge);
@@ -225,6 +227,35 @@ public final class McpService extends Service {
         }
     }
 
+    /**
+     * Re-arms this package's saved hooks now that one of its processes is up.
+     *
+     * <p>Runs on the thread {@link BridgeServer} started for it, because it calls
+     * back into the peer and the thread that accepted the connection is already
+     * committed to reading from it.
+     */
+    private void onPeerReady(String pkg, String peerKey) {
+        BridgeServer server = bridge;
+        if (server == null) {
+            return;
+        }
+        HookDeploy.deploy(this, server, peerKey, pkg, moduleApk());
+    }
+
+    /**
+     * Where the module APK lives, for the module to load its own native library
+     * from inside someone else's process. Only this app can work it out: the
+     * module's class loader gives no code source, and the PackageManager does not
+     * show it an application it does not own.
+     */
+    public String moduleApk() {
+        try {
+            return getApplicationInfo().sourceDir;
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
     @Override
     public IBinder onBind(Intent intent) {
         return null;
@@ -272,6 +303,28 @@ public final class McpService extends Service {
     public boolean hasAppPeer(String pkg) {
         BridgeServer server = bridge;
         return server != null && server.hasAppPeer(pkg);
+    }
+
+    /**
+     * Arms a saved hook in every live process of its app, because the user just
+     * turned it on in the hook page.
+     *
+     * @return how many processes took it, or {@code null} if the service is down
+     */
+    public org.json.JSONObject armHook(SavedHook hook) {
+        BridgeServer server = bridge;
+        if (server == null) {
+            return null;
+        }
+        return HookDeploy.applyToAllProcesses(server, hook, moduleApk());
+    }
+
+    /** Takes a hook out of every live process, because the user turned it off. */
+    public void disarmHook(SavedHook hook) {
+        BridgeServer server = bridge;
+        if (server != null) {
+            HookDeploy.clearFromAllProcesses(server, hook);
+        }
     }
 
     /** The registered tools, so the status tab lists what actually exists. */

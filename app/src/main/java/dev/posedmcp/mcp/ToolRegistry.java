@@ -33,7 +33,9 @@ import dev.posedmcp.root.ConfirmationGate;
 import dev.posedmcp.root.RootShell;
 import dev.posedmcp.state.DeviceStatus;
 import dev.posedmcp.state.EventStore;
+import dev.posedmcp.state.HookStore;
 import dev.posedmcp.state.Prefs;
+import dev.posedmcp.state.SavedHook;
 import dev.posedmcp.state.SavedScript;
 import dev.posedmcp.state.ScriptStore;
 import dev.posedmcp.tools.Capabilities;
@@ -61,7 +63,9 @@ public final class ToolRegistry {
      * Generous on purpose: it is paid once per approved action, and being too
      * short means the agent reads its own prompt back as if it were the screen.
      */
-    private static final long OVERLAY_SETTLE_MS = 400L;    private static final int MAX_UI_NODES = 600;
+    private static final long OVERLAY_SETTLE_MS = 400L;
+
+    private static final int MAX_UI_NODES = 600;
     private static final long MAX_DEX_BYTES = 32L * 1024 * 1024;
 
     private final Context context;
@@ -979,23 +983,32 @@ public final class ToolRegistry {
 
         add(McpTool.of("hook_method")
                 .title("Watch or change a method at runtime")
-                .description("Installs a hook on a method inside a running application."
-                        + " By default it only records: every call's arguments, return value,"
-                        + " exception and thread. Supply any of the modification options and it"
-                        + " also changes what the application does."
-                        + " \n\nThis is the dynamic half of analysis, and it needs no plugin DEX -"
-                        + " the module installs the hook directly. The usual loop is: find a"
-                        + " method with dex_search or smali_disassemble, hook it here, use the app,"
-                        + " then read hook_records to see what flowed through it."
+                .description("Installs a hook on a method inside a running application, and"
+                        + " keeps it. By default the hook only records: every call's arguments,"
+                        + " return value, exception and thread. Supply any of the modification"
+                        + " options and it also changes what the application does."
+                        + " \n\nPersistent by design. A runtime hook normally dies with the"
+                        + " process it was installed into, and on this device processes are"
+                        + " killed and frozen constantly - so a hook that vanished on the next"
+                        + " app start was useless for anything but one sitting. This one is"
+                        + " stored and re-armed automatically inside every process of that"
+                        + " application as it starts. Pass persist=false for a hook you only"
+                        + " want for the next few minutes."
+                        + " \n\nBecause a kept hook keeps working without asking again, it shows"
+                        + " up on the app's Hooks page, where the user can switch it off or"
+                        + " delete it. hook_list shows them; hook_clear removes one for good."
+                        + " \n\nThis is the dynamic half of analysis, and it needs no plugin"
+                        + " DEX - the module installs the hook directly. The usual loop is: find"
+                        + " a method with dex_search or smali_disassemble, hook it here, use the"
+                        + " app, then read hook_records to see what flowed through it."
                         + " \n\nModification options, all optional and combinable:"
                         + " return_value makes the method produce that value and skips the original"
                         + " entirely; set_args replaces arguments before the call; set_fields"
                         + " assigns fields on the instance after the call. Values are parsed as"
                         + " JSON when possible, so \"false\" is a boolean and \"42\" a number, and"
                         + " are converted to whatever type the method actually declares."
-                        + " \n\nPrefer this over plugin_load whenever the change can be expressed"
-                        + " as a value: nothing has to be compiled, and the effect is visible in"
-                        + " hook_records as 'altered'. Always prompts.")
+                        + " \n\nFor a body that is logic rather than a value - branch, loop, call"
+                        + " something else - use hook_lua. Always prompts.")
                 .mutating()
                 .input(props(
                         "package", McpTool.string("Target package whose process should be hooked"),
@@ -1011,6 +1024,9 @@ public final class ToolRegistry {
                                 + " assigned on the instance after the call, e.g. {\"mEnabled\":true}"),
                         "observe", McpTool.type("boolean", "Keep recording calls. Default true"),
                         "max_records", McpTool.integer("Keep at most this many calls, default 200"),
+                        "persist", McpTool.type("boolean", "Keep the hook and re-arm it whenever"
+                                + " that app starts. Default true; false is for a hook you will"
+                                + " clear within the same sitting."),
                         "reason", McpTool.string("Why this is needed. Shown to the user.")),
                         "package", "class", "method", "reason")
                 .handler(args -> {
@@ -1018,6 +1034,7 @@ public final class ToolRegistry {
                     String className = require(args, "class");
                     String method = require(args, "method");
                     String reason = require(args, "reason");
+                    boolean persist = args.optBoolean("persist", true);
 
                     String effect = describeHookEffect(args);
                     requireConfirmation(ConfirmationGate.Kind.PLUGIN,
@@ -1026,7 +1043,10 @@ public final class ToolRegistry {
                                     : "Change behaviour in " + pkg,
                             className + "." + method
                                     + "(" + args.optString("params", "") + ")"
-                                    + (effect == null ? "" : "\n" + effect),
+                                    + (effect == null ? "" : "\n" + effect)
+                                    + (persist ? "\n\nThis hook is kept. It will be re-armed"
+                                            + " automatically every time that application starts,"
+                                            + " until you take it off the Hooks page." : ""),
                             reason);
 
                     requireAppPeer(pkg);
@@ -1041,9 +1061,31 @@ public final class ToolRegistry {
                             call.put(key, args.get(key));
                         }
                     }
-                    return McpTool.json(summarizeAcrossProcesses(
+                    JSONObject out = summarizeAcrossProcesses(
                             capabilities.appCallAll(pkg, "hook_method", call, 30_000L),
-                            "hookedIn", "The hook is installed wherever the method runs."));
+                            "hookedIn", "The hook is installed wherever the method runs.");
+
+                    if (persist) {
+                        SavedHook hook = new SavedHook();
+                        hook.packageName = pkg;
+                        hook.className = className;
+                        hook.methodName = method;
+                        hook.params = args.optString("params", "");
+                        hook.body = SavedHook.BODY_RULE;
+                        // The request itself is the definition, so re-arming is a
+                        // copy rather than a translation that could drift.
+                        hook.spec = call.toString();
+                        hook.effect = reason;
+                        hook.enabled = true;
+                        HookStore.of(context).save(hook);
+                        out.put("saved", true);
+                        out.put("target", hook.target());
+                    } else {
+                        out.put("saved", false);
+                        out.put("note", "persist=false: this hook lives only in the processes"
+                                + " running now, and is gone when they restart.");
+                    }
+                    return McpTool.json(out);
                 })
                 .build());
 
@@ -1092,10 +1134,12 @@ public final class ToolRegistry {
                 .build());
 
         add(McpTool.of("hook_clear")
-                .title("Remove runtime hooks")
-                .description("Unhooks everything matching, or everything in the process when no"
-                        + " subject is given. Worth doing once you are finished: a watched app"
-                        + " keeps paying for hooks you no longer read. Prompts.")
+                .title("Remove hooks, for good")
+                .description("Unhooks everything matching in every process of the package, and"
+                        + " removes the saved definitions too, so nothing is re-armed when that"
+                        + " app next starts. Worth doing once you are finished: a watched app"
+                        + " keeps paying for hooks you no longer read, and a kept hook keeps"
+                        + " working without asking again. Prompts.")
                 .mutating()
                 .input(props(
                         "package", McpTool.string("Target package"),
@@ -1109,17 +1153,135 @@ public final class ToolRegistry {
                     String subject = args.optString("subject", "");
 
                     requireConfirmation(ConfirmationGate.Kind.PLUGIN,
-                            "Remove runtime hooks from " + pkg,
-                            subject.isEmpty() ? "all hooks in this process"
+                            "Remove hooks from " + pkg,
+                            subject.isEmpty() ? "all hooks in this package"
                                     : "hooks matching \"" + subject + "\"",
                             reason);
 
                     requireAppPeer(pkg);
                     JSONObject call = new JSONObject();
                     call.put("subject", subject);
-                    return McpTool.json(summarizeAcrossProcesses(
+                    JSONObject out = summarizeAcrossProcesses(
                             capabilities.appCallAll(pkg, "hook_clear", call, 20_000L),
-                            "clearedIn", "Every process of the package was asked."));
+                            "clearedIn", "Every process of the package was asked.");
+
+                    // Forget the definitions as well. A saved hook re-arms itself,
+                    // so clearing only the process would bring it back the next
+                    // time the app starts - the exact opposite of what was asked.
+                    JSONArray forgotten = forgetHooks(pkg, subject);
+                    out.put("forgottenSavedHooks", forgotten);
+                    if (forgotten.length() > 0) {
+                        out.put("note", "Also removed from the saved hooks, so it will not come"
+                                + " back when that application restarts.");
+                    }
+                    return McpTool.json(out);
+                })
+                .build());
+
+        add(McpTool.of("hook_lua")
+                .title("Register a hook whose body is a Lua script")
+                .description("The same idea as hook_method, but the body is logic rather than a"
+                        + " value: it can read the arguments, decide, call other things, and"
+                        + " change or replace the result. The script must call app.hook{...}"
+                        + " exactly once, which is what actually installs it."
+                        + " \n\nExample: app.hook{class = \"com.x.Y\", method = \"isPro\","
+                        + " effect = \"pretend everything is unlocked\", after = function(ctx)"
+                        + " ctx.set_result(true) end}"
+                        + " \n\nThe context a body receives is ctx: args (a table of what the"
+                        + " call got), this, phase, and set_arg(i,v) / set_result(v) / result() /"
+                        + " throwable() / field(name) / set_field(name,v). A call to set_result"
+                        + " skips the original method."
+                        + " \n\nAn error inside the body never reaches the application - but it"
+                        + " is recorded, and hook_records reports it, because a hook that fails"
+                        + " on every call otherwise looks exactly like one that matches nothing."
+                        + " \n\nLike hook_method this is kept: the script is re-run in each"
+                        + " process as the app starts, so it should do nothing but register the"
+                        + " hook. The user can see and remove it on the Hooks page. Prompts.")
+                .mutating()
+                .input(props(
+                        "package", McpTool.string("Target package to register the hook in"),
+                        "source", McpTool.string("Lua that calls app.hook{...} exactly once"),
+                        "reason", McpTool.string("Why this is needed. Shown to the user.")),
+                        "package", "source", "reason")
+                .handler(args -> {
+                    String pkg = require(args, "package");
+                    String source = require(args, "source");
+                    String reason = require(args, "reason");
+
+                    requireConfirmation(ConfirmationGate.Kind.PLUGIN,
+                            "Register a Lua hook in " + pkg,
+                            source + "\n\nThis hook is kept. It is re-run automatically every time"
+                                    + " that application starts, so it stays in the app until you"
+                                    + " take it off the Hooks page.",
+                            reason);
+
+                    requireAppPeer(pkg);
+                    JSONObject call = new JSONObject();
+                    call.put("source", source);
+                    call.put("max_instructions", LuaRuntime.DEFAULT_MAX_INSTRUCTIONS);
+                    call.put("module_apk", context.getApplicationInfo().sourceDir);
+
+                    JSONArray across = capabilities.appCallAll(pkg, "lua_exec", call, 45_000L);
+                    JSONObject out = summarizeAcrossProcesses(across, "ranIn",
+                            "The script was run in every process of the package.");
+
+                    SavedHook hook = registeredHook(across);
+                    if (hook == null) {
+                        out.put("saved", false);
+                        out.put("warning", "Nothing was saved: the script has to register exactly"
+                                + " one hook. A kept Lua hook arms itself by being run again, so a"
+                                + " script registering none, or several, cannot be kept.");
+                        return McpTool.json(out);
+                    }
+                    hook.packageName = pkg;
+                    hook.body = SavedHook.BODY_LUA;
+                    hook.source = source;
+                    if (hook.effect == null || hook.effect.isEmpty()) {
+                        hook.effect = reason;
+                    }
+                    hook.enabled = true;
+                    HookStore.of(context).save(hook);
+                    out.put("saved", true);
+                    out.put("target", hook.target());
+                    return McpTool.json(out);
+                })
+                .build());
+
+        add(McpTool.of("hook_list")
+                .title("List kept hooks")
+                .description("The hooks that are kept for this device: which app each one is in,"
+                        + " what it is attached to, whether it is switched on, and whether a"
+                        + " process has actually taken it. These re-arm themselves every time"
+                        + " their app starts, so this is the list that says what is quietly"
+                        + " happening without asking. Read-only, never prompts.")
+                .readOnly()
+                .input(props(
+                        "package", McpTool.string("Only hooks for this package")))
+                .handler(args -> {
+                    String pkg = args.optString("package", "");
+                    HookStore store = HookStore.of(context);
+                    List<String> packages = pkg.isEmpty()
+                            ? store.packages() : Collections.singletonList(pkg);
+
+                    JSONArray hooks = new JSONArray();
+                    JSONArray running = new JSONArray();
+                    for (String name : packages) {
+                        if (bridge.hasAppPeer(name)) {
+                            running.put(name);
+                        }
+                        for (SavedHook hook : store.forPackage(name)) {
+                            hooks.put(hook.describe());
+                        }
+                    }
+
+                    JSONObject out = new JSONObject();
+                    out.put("hooks", hooks);
+                    out.put("appsRunningNow", running);
+                    if (hooks.length() == 0) {
+                        out.put("note", "nothing is kept for " + (pkg.isEmpty()
+                                ? "any application" : pkg));
+                    }
+                    return McpTool.json(out);
                 })
                 .build());
 
@@ -1578,8 +1740,63 @@ public final class ToolRegistry {
         return parts.isEmpty() ? null : String.join("\n", parts);
     }
 
-    private static String describeInputTarget(String action, JSONObject args) {
-        switch (action) {
+    /**
+     * Drops the saved definitions matching a clear request.
+     *
+     * <p>A kept hook re-arms itself, so clearing only the live process would
+     * bring it back the next time that app starts. "Clear" has to mean the hook
+     * is gone, not that it is gone until the app is restarted.
+     */
+    private JSONArray forgetHooks(String pkg, String subject) throws Exception {
+        HookStore store = HookStore.of(context);
+        String needle = subject == null ? "" : subject.toLowerCase(Locale.ROOT);
+        JSONArray gone = new JSONArray();
+        for (SavedHook hook : store.forPackage(pkg)) {
+            if (needle.isEmpty() || hook.target().toLowerCase(Locale.ROOT).contains(needle)) {
+                store.delete(hook.id);
+                gone.put(hook.target());
+            }
+        }
+        return gone;
+    }
+
+    /**
+     * The single hook a Lua script registered, or {@code null} if it registered
+     * any other number.
+     *
+     * <p>Exactly one, on purpose: a kept Lua hook arms itself by being run again,
+     * so a script holding two would be run twice on every start and would have
+     * no single target to show the user.
+     */
+    private static SavedHook registeredHook(JSONArray across) throws Exception {
+        Map<String, SavedHook> distinct = new LinkedHashMap<>();
+        for (int i = 0; i < across.length(); i++) {
+            JSONObject entry = across.optJSONObject(i);
+            if (entry == null || !entry.optBoolean("ok", false)) {
+                continue;
+            }
+            JSONObject result = entry.optJSONObject("result");
+            JSONArray installed = result == null ? null : result.optJSONArray("hooksInstalled");
+            if (installed == null) {
+                continue;
+            }
+            for (int j = 0; j < installed.length(); j++) {
+                JSONObject item = installed.optJSONObject(j);
+                if (item == null) {
+                    continue;
+                }
+                SavedHook hook = new SavedHook();
+                hook.className = item.optString("class", "");
+                hook.methodName = item.optString("method", "");
+                hook.params = item.optString("params", "");
+                hook.effect = item.optString("effect", "");
+                distinct.put(hook.className + "#" + hook.methodName, hook);
+            }
+        }
+        return distinct.size() == 1 ? distinct.values().iterator().next() : null;
+    }
+
+    private static String describeInputTarget(String action, JSONObject args) {        switch (action) {
             case "tap":
                 return "at (" + args.optInt("x") + "," + args.optInt("y") + ")";
             case "long_press":

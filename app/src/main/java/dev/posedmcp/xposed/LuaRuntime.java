@@ -46,6 +46,7 @@ import java.util.List;
 import java.util.Map;
 
 import dev.posedmcp.Logx;
+import dev.posedmcp.plugin.HookApi;
 
 /**
  * Runs a Lua script inside a target application's process.
@@ -140,7 +141,10 @@ public final class LuaRuntime {
         Budget budget = new Budget(limit);
         Globals globals = globals(out, budget);
         List<SQLiteDatabase> databases = new ArrayList<>();
-        globals.set("app", host(packageName, appClassLoader, appContext, out, databases));
+        // Hooks a script registers are reported back, so the caller can offer to
+        // keep them: a hook that dies with the process is only half a hook.
+        List<JSONObject> installed = new ArrayList<>();
+        globals.set("app", host(packageName, appClassLoader, appContext, out, databases, installed));
 
         long startedAt = System.currentTimeMillis();
         try {
@@ -148,15 +152,15 @@ public final class LuaRuntime {
             // biggest thing a script has over a hand-written DEX.
             LuaValue chunk = globals.load(source, "lua_exec");
             LuaValue returned = chunk.call();
-            return result(true, describe(returned), null, captured, budget, startedAt);
+            return result(true, describe(returned), null, captured, budget, startedAt, installed);
         } catch (LuaError e) {
-            return result(false, null, e.getMessage(), captured, budget, startedAt);
+            return result(false, null, e.getMessage(), captured, budget, startedAt, installed);
         } catch (Throwable t) {
             // StackOverflowError from runaway recursion, OutOfMemoryError from a
             // script that builds a huge table - both should be reported rather
             // than allowed to take the target process down silently.
             return result(false, null, t.getClass().getSimpleName() + ": " + t.getMessage(),
-                    captured, budget, startedAt);
+                    captured, budget, startedAt, installed);
         } finally {
             // A database left open would hold a file descriptor in the target
             // process for as long as that process lives.
@@ -239,7 +243,7 @@ public final class LuaRuntime {
     }
 
     private static LuaTable host(String packageName, ClassLoader loader, Context context,
-            PrintStream out, List<SQLiteDatabase> databases) {
+            PrintStream out, List<SQLiteDatabase> databases, List<JSONObject> installed) {
         LuaTable host = new LuaTable();
         host.set("name", fn(a -> LuaValue.valueOf(packageName)));
         host.set("uid", fn(a -> LuaValue.valueOf(android.os.Process.myUid())));
@@ -287,6 +291,8 @@ public final class LuaRuntime {
 
         host.set("db", fn(a -> openDatabase(a.checkjstring(1), databases)));
 
+        host.set("hook", fn(a -> installHook(a.arg(1), loader, installed)));
+
         host.set("native", nativeApi());
 
         host.set("log", fn(a -> {
@@ -297,6 +303,155 @@ public final class LuaRuntime {
         }));
 
         return host;
+    }
+
+    // ---- hooks -------------------------------------------------------------
+
+    /**
+     * {@code app.hook{...}} - registers a hook whose body is a Lua function.
+     *
+     * <p>This is what lets the interpreter do more than run once. A script
+     * normally ends and its state goes with it; a function handed here is kept by
+     * the module and called again on every matching call, long after the script
+     * that defined it has returned.
+     *
+     * <p>The declaration is a table rather than positional arguments because most
+     * of it is optional, and because a hook ends up as a row the user reads on
+     * the hook page - these fields are what that page shows.
+     */
+    private static LuaValue installHook(LuaValue spec, ClassLoader loader,
+            List<JSONObject> installed) throws Exception {
+        if (!spec.istable()) {
+            throw new LuaError("app.hook takes a table, for example: app.hook{"
+                    + "class = \"com.x.Y\", method = \"z\", effect = \"what this does\","
+                    + " after = function(ctx) print(ctx.result()) end}");
+        }
+        LuaTable t = spec.checktable();
+        String className = textOf(t.get("class"));
+        String methodName = textOf(t.get("method"));
+        if (className.isEmpty() || methodName.isEmpty()) {
+            throw new LuaError("app.hook needs 'class' and 'method'");
+        }
+
+        LuaValue before = t.get("before");
+        LuaValue after = t.get("after");
+        if (before.isnil() && after.isnil()) {
+            throw new LuaError("app.hook needs a 'before' or an 'after' function - a hook"
+                    + " with no body would just be a slower method call");
+        }
+        // isfunction() is a real type check, unlike isstring()/isnumber().
+        if ((!before.isnil() && !before.isfunction()) || (!after.isnil() && !after.isfunction())) {
+            throw new LuaError("'before' and 'after' must be functions");
+        }
+
+        String effect = textOf(t.get("effect"));
+        HookRegistry.installCustom(className, methodName,
+                textOf(t.get("params")), t.get("max_records").optint(200),
+                new LuaHookBody(before, after), effect.isEmpty() ? null : effect, loader);
+
+        if (installed != null) {
+            installed.add(new JSONObject()
+                    .put("class", className)
+                    .put("method", methodName)
+                    .put("params", textOf(t.get("params")))
+                    .put("effect", effect));
+        }
+
+        LuaTable back = new LuaTable();
+        back.set("class", LuaValue.valueOf(className));
+        back.set("method", LuaValue.valueOf(methodName));
+        back.set("effect", LuaValue.valueOf(effect));
+        return back;
+    }
+
+    private static String textOf(LuaValue value) {
+        return value == null || value.isnil() ? "" : value.tojstring();
+    }
+
+    /**
+     * A hook whose body is a Lua function.
+     *
+     * <p>The closure is held here, in Java, on purpose: the script's environment
+     * is discarded when it finishes, so this reference is the only thing keeping
+     * the function - and the globals it was compiled against - alive.
+     */
+    private static final class LuaHookBody implements HookRegistry.Body {
+        private final LuaValue before;
+        private final LuaValue after;
+
+        LuaHookBody(LuaValue before, LuaValue after) {
+            this.before = before;
+            this.after = after;
+        }
+
+        @Override
+        public void call(HookApi.HookParam param, boolean isAfter, String target) {
+            LuaValue body = isAfter ? after : before;
+            if (body == null || body.isnil()) {
+                return;
+            }
+            body.call(hookContext(param, isAfter, target));
+        }
+    }
+
+    /**
+     * What a hook body is handed: the call in front of it, and the few things it
+     * can do to that call.
+     *
+     * <p>Deliberately narrow. A hook runs on the application's own thread, in the
+     * middle of the application's own call, so everything reachable from here is
+     * reachable at the worst possible moment. These are the operations that make
+     * a hook useful and nothing beyond them.
+     */
+    private static LuaTable hookContext(HookApi.HookParam param, boolean after, String target) {
+        LuaTable ctx = new LuaTable();
+        ctx.set("phase", LuaValue.valueOf(after ? "after" : "before"));
+        ctx.set("target", LuaValue.valueOf(target));
+        ctx.set("this", coerce(param.thisObject()));
+
+        LuaTable args = new LuaTable();
+        Object[] live = param.args();
+        if (live != null) {
+            for (int i = 0; i < live.length; i++) {
+                args.set(i + 1, coerce(live[i]));
+            }
+        }
+        ctx.set("args", args);
+
+        ctx.set("set_arg", fn(a -> {
+            int index = a.checkint(1);
+            Object[] raw = param.args();
+            if (raw == null || index < 1 || index > raw.length) {
+                return LuaValue.FALSE;
+            }
+            Object current = raw[index - 1];
+            raw[index - 1] = convert(a.arg(2),
+                    current == null ? Object.class : current.getClass());
+            HookRegistry.markAltered();
+            return LuaValue.TRUE;
+        }));
+
+        ctx.set("set_result", fn(a -> {
+            // Setting a result here makes the framework skip the original.
+            param.setResult(toJava(a.arg(1)));
+            HookRegistry.markAltered();
+            return LuaValue.NIL;
+        }));
+
+        ctx.set("result", fn(a -> coerce(param.result())));
+        ctx.set("throwable", fn(a -> coerce(param.throwable())));
+
+        ctx.set("field", fn(a -> coerce(param.getObjectField(a.checkjstring(1)))));
+        ctx.set("set_field", fn(a -> {
+            String name = a.checkjstring(1);
+            Object current = param.getObjectField(name);
+            param.setObjectField(name,
+                    convert(a.arg(2), current == null ? Object.class : current.getClass()));
+            HookRegistry.markAltered();
+            return LuaValue.NIL;
+        }));
+
+        return ctx;
     }
 
     // ---- reflection --------------------------------------------------------
@@ -1082,7 +1237,8 @@ public final class LuaRuntime {
     }
 
     private static JSONObject result(boolean ok, Object returned, String error,
-            ByteArrayOutputStream captured, Budget budget, long startedAt) throws Exception {
+            ByteArrayOutputStream captured, Budget budget, long startedAt,
+            List<JSONObject> installed) throws Exception {
         JSONObject out = new JSONObject();
         out.put("ok", ok);
         if (ok) {
@@ -1096,6 +1252,11 @@ public final class LuaRuntime {
         out.put("instructions", budget.used());
         out.put("maxInstructions", budget.limit());
         out.put("durationMs", System.currentTimeMillis() - startedAt);
+        if (installed != null && !installed.isEmpty()) {
+            // Reported even when the script failed afterwards: a hook it managed
+            // to install is live in this process whether the script finished or not.
+            out.put("hooksInstalled", new org.json.JSONArray(installed));
+        }
         return out;
     }
 

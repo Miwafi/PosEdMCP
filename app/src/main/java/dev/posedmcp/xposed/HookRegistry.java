@@ -91,12 +91,27 @@ public final class HookRegistry {
         }
     }
 
+    /**
+     * A hook body the caller supplies, instead of the declarative rule.
+     *
+     * <p>This is what lets a Lua function be a hook: the interpreter hands the
+     * closure here, this module holds it, and the closure outlives the script
+     * that defined it. It runs on the application's own thread, in the middle of
+     * its call, so an implementation must be cheap and must not throw.
+     */
+    public interface Body {
+        /** @param after whether the original method has already run */
+        void call(HookApi.HookParam param, boolean after, String target) throws Exception;
+    }
+
     private static final class Record {
         long timestamp;
         String thread;
         String[] args;
         String result;
         String threw;
+        /** Why a caller-supplied body failed on this call, if it did. */
+        String bodyError;
         boolean altered;
     }
 
@@ -105,17 +120,30 @@ public final class HookRegistry {
         final String methodName;
         final int maxRecords;
         final Rule rule;
+        /** Set when the body comes from the caller; null for the declarative rule. */
+        final Body body;
+        /** What a listing says this hook does, when the rule cannot describe it. */
+        final String label;
         /** The resolved member, when the signature identified exactly one. */
         final Executable target;
         final Deque<Record> records = new ArrayDeque<>();
+        /** Why the caller-supplied body last failed, or null while it is healthy. */
+        volatile String bodyError;
         volatile HookApi.Unhook unhook;
 
-        Entry(String className, String methodName, int maxRecords, Rule rule, Executable target) {
+        Entry(String className, String methodName, int maxRecords, Rule rule, Body body,
+                String label, Executable target) {
             this.className = className;
             this.methodName = methodName;
             this.maxRecords = maxRecords;
             this.rule = rule;
+            this.body = body;
+            this.label = label;
             this.target = target;
+        }
+
+        String effect() {
+            return label != null && !label.isEmpty() ? label : rule.describe();
         }
 
         String key() {
@@ -133,51 +161,56 @@ public final class HookRegistry {
         if (methodName == null || methodName.isEmpty()) {
             throw new IllegalArgumentException("method is required");
         }
-        int cap = maxRecords <= 0 ? DEFAULT_MAX_RECORDS : Math.min(maxRecords, HARD_MAX_RECORDS);
         Rule rule = parseRule(spec);
-        Executable target = resolveTarget(className, methodName, paramTypes, appClassLoader);
-        Entry entry = new Entry(className, methodName, cap, rule, target);
+        Entry entry = new Entry(className, methodName, cap(maxRecords), rule, null, null,
+                resolveTarget(className, methodName, paramTypes, appClassLoader));
+        return arm(entry, paramTypes, appClassLoader);
+    }
+
+    /**
+     * Installs a hook whose body the caller supplies, rather than a rule.
+     *
+     * <p>Used by the Lua runtime, where the body is a script function held here
+     * in Java so that it survives the script that defined it. {@code label} is
+     * the description a listing shows, since a rule has nothing to describe.
+     */
+    public static JSONObject installCustom(String className, String methodName, String paramTypes,
+            int maxRecords, Body body, String label, ClassLoader appClassLoader) throws Exception {
+        if (className == null || className.isEmpty()) {
+            throw new IllegalArgumentException("class is required");
+        }
+        if (methodName == null || methodName.isEmpty()) {
+            throw new IllegalArgumentException("method is required");
+        }
+        if (body == null) {
+            throw new IllegalArgumentException("body is required");
+        }
+        Entry entry = new Entry(className, methodName, cap(maxRecords), new Rule(), body, label,
+                resolveTarget(className, methodName, paramTypes, appClassLoader));
+        return arm(entry, paramTypes, appClassLoader);
+    }
+
+    private static int cap(int maxRecords) {
+        return maxRecords <= 0 ? DEFAULT_MAX_RECORDS : Math.min(maxRecords, HARD_MAX_RECORDS);
+    }
+
+    private static JSONObject arm(Entry entry, String paramTypes, ClassLoader appClassLoader)
+            throws Exception {
+        String className = entry.className;
+        String methodName = entry.methodName;
 
         HookApi api = new XposedHookApi(appClassLoader);
         HookApi.Callback callback = new HookApi.Callback() {
             @Override
             public void before(HookApi.HookParam param) {
                 try {
-                    Rule r = entry.rule;
-
-                    // Rewriting the array in place is how classic Xposed changes
-                    // what the original receives.
-                    if (!r.argOverrides.isEmpty() && param.args() != null) {
-                        Class<?>[] types = parameterTypes(entry.target);
-                        for (Map.Entry<Integer, Object> override : r.argOverrides.entrySet()) {
-                            int index = override.getKey();
-                            if (index < 0 || index >= param.args().length) {
-                                continue;
-                            }
-                            Class<?> wanted = types != null && index < types.length ? types[index]
-                                    : typeOf(param.args()[index]);
-                            param.args()[index] = coerce(override.getValue(), wanted);
-                        }
+                    if (entry.body != null) {
+                        runBody(entry, param, false);
+                    } else {
+                        rewriteBefore(entry, param);
                     }
-
-                    if (r.hasReturn) {
-                        // Setting a result here makes the framework skip the
-                        // original method outright.
-                        param.setResult(coerce(r.returnValue, returnType(entry.target)));
-                    }
-
-                    if (r.observe) {
-                        Record record = new Record();
-                        record.timestamp = System.currentTimeMillis();
-                        record.thread = Thread.currentThread().getName();
-                        Object[] args = param.args();
-                        int n = args == null ? 0 : Math.min(args.length, MAX_ARGUMENTS);
-                        record.args = new String[n];
-                        for (int i = 0; i < n; i++) {
-                            record.args[i] = describe(args[i]);
-                        }
-                        record.altered = r.changesAnything();
-                        IN_FLIGHT.set(record);
+                    if (entry.rule.observe) {
+                        IN_FLIGHT.set(openRecord(entry, param));
                     }
                 } catch (Throwable ignored) {
                 }
@@ -186,36 +219,13 @@ public final class HookRegistry {
             @Override
             public void after(HookApi.HookParam param) {
                 try {
-                    Rule r = entry.rule;
-
-                    if (!r.fieldAssignments.isEmpty() && param.thisObject() != null) {
-                        for (Map.Entry<String, Object> assignment : r.fieldAssignments.entrySet()) {
-                            Object current = param.getObjectField(assignment.getKey());
-                            param.setObjectField(assignment.getKey(),
-                                    coerce(assignment.getValue(), typeOf(current)));
-                        }
-                    }
-
-                    if (!r.observe) {
-                        return;
-                    }
-                    Record record = IN_FLIGHT.get();
-                    IN_FLIGHT.remove();
-                    if (record == null) {
-                        return;
-                    }
-                    Throwable thrown = param.throwable();
-                    if (thrown != null) {
-                        record.threw = thrown.getClass().getName()
-                                + (thrown.getMessage() == null ? "" : ": " + thrown.getMessage());
+                    if (entry.body != null) {
+                        runBody(entry, param, true);
                     } else {
-                        record.result = describe(param.result());
+                        rewriteAfter(entry, param);
                     }
-                    synchronized (entry.records) {
-                        entry.records.addLast(record);
-                        while (entry.records.size() > entry.maxRecords) {
-                            entry.records.removeFirst();
-                        }
+                    if (entry.rule.observe) {
+                        closeRecord(entry, param);
                     }
                 } catch (Throwable ignored) {
                 }
@@ -251,12 +261,123 @@ public final class HookRegistry {
         out.put("hooked", true);
         out.put("class", className);
         out.put("method", methodName);
-        out.put("effect", rule.describe());
-        if (rule.changesAnything()) {
+        out.put("effect", entry.effect());
+        if (entry.body == null && entry.rule.changesAnything()) {
             out.put("note", "This hook changes behaviour, not just records it.");
         }
-        out.put("maxRecords", cap);
+        out.put("maxRecords", entry.maxRecords);
         return out;
+    }
+
+    /**
+     * Called by a hook body that has just changed the call it is looking at.
+     *
+     * <p>Only a caller-supplied body knows this: a rule declares up front whether
+     * it changes anything, but a Lua body decides per call. Without it,
+     * hook_records would show a Lua hook's calls as untouched observations while
+     * they were in fact being rewritten - the sort of quiet wrong answer this
+     * module exists to avoid.
+     */
+    static void markAltered() {
+        Record record = IN_FLIGHT.get();
+        if (record != null) {
+            record.altered = true;
+        }
+    }
+
+    /**
+     * Runs a caller-supplied body on the application's own thread.
+     *
+     * <p>A failure here is recorded rather than allowed to reach the app, but it
+     * is <em>not</em> swallowed silently: a Lua hook whose body throws on every
+     * call would otherwise look exactly like a hook that matches nothing, which
+     * is the failure mode this whole module was rebuilt to avoid.
+     */
+    private static void runBody(Entry entry, HookApi.HookParam param, boolean after) {
+        try {
+            entry.body.call(param, after, entry.key());
+            entry.bodyError = null;
+        } catch (Throwable t) {
+            entry.bodyError = t.getClass().getSimpleName()
+                    + (t.getMessage() == null ? "" : ": " + t.getMessage());
+        }
+    }
+
+    /** Applies the declarative rule before the original runs. */
+    private static void rewriteBefore(Entry entry, HookApi.HookParam param) {
+        Rule r = entry.rule;
+
+        // Rewriting the array in place is how classic Xposed changes what the
+        // original receives.
+        if (!r.argOverrides.isEmpty() && param.args() != null) {
+            Class<?>[] types = parameterTypes(entry.target);
+            for (Map.Entry<Integer, Object> override : r.argOverrides.entrySet()) {
+                int index = override.getKey();
+                if (index < 0 || index >= param.args().length) {
+                    continue;
+                }
+                Class<?> wanted = types != null && index < types.length ? types[index]
+                        : typeOf(param.args()[index]);
+                param.args()[index] = coerce(override.getValue(), wanted);
+            }
+        }
+
+        if (r.hasReturn) {
+            // Setting a result here makes the framework skip the original method
+            // outright.
+            param.setResult(coerce(r.returnValue, returnType(entry.target)));
+        }
+    }
+
+    /** Applies the declarative rule after the original runs. */
+    private static void rewriteAfter(Entry entry, HookApi.HookParam param) {
+        Rule r = entry.rule;
+        if (r.fieldAssignments.isEmpty() || param.thisObject() == null) {
+            return;
+        }
+        for (Map.Entry<String, Object> assignment : r.fieldAssignments.entrySet()) {
+            Object current = param.getObjectField(assignment.getKey());
+            param.setObjectField(assignment.getKey(),
+                    coerce(assignment.getValue(), typeOf(current)));
+        }
+    }
+
+    private static Record openRecord(Entry entry, HookApi.HookParam param) {
+        Record record = new Record();
+        record.timestamp = System.currentTimeMillis();
+        record.thread = Thread.currentThread().getName();
+        Object[] args = param.args();
+        int n = args == null ? 0 : Math.min(args.length, MAX_ARGUMENTS);
+        record.args = new String[n];
+        for (int i = 0; i < n; i++) {
+            record.args[i] = describe(args[i]);
+        }
+        record.altered = entry.body == null && entry.rule.changesAnything();
+        return record;
+    }
+
+    private static void closeRecord(Entry entry, HookApi.HookParam param) {
+        Record record = IN_FLIGHT.get();
+        IN_FLIGHT.remove();
+        if (record == null) {
+            return;
+        }
+        Throwable thrown = param.throwable();
+        if (thrown != null) {
+            record.threw = thrown.getClass().getName()
+                    + (thrown.getMessage() == null ? "" : ": " + thrown.getMessage());
+        } else {
+            record.result = describe(param.result());
+        }
+        if (entry.bodyError != null) {
+            record.bodyError = entry.bodyError;
+        }
+        synchronized (entry.records) {
+            entry.records.addLast(record);
+            while (entry.records.size() > entry.maxRecords) {
+                entry.records.removeFirst();
+            }
+        }
     }
 
     public static JSONObject records(String subject, int limit) throws Exception {
@@ -271,7 +392,12 @@ public final class HookRegistry {
             }
             JSONObject summary = new JSONObject();
             summary.put("target", entry.key());
-            summary.put("effect", entry.rule.describe());
+            summary.put("effect", entry.effect());
+            if (entry.bodyError != null) {
+                // A hook that is installed but failing looks exactly like one
+                // that never matches, unless this is said out loud.
+                summary.put("bodyError", entry.bodyError);
+            }
             synchronized (entry.records) {
                 summary.put("recordCount", entry.records.size());
             }
@@ -606,6 +732,9 @@ public final class HookRegistry {
             } else {
                 o.put("result", record.result);
             }
+            if (record.bodyError != null) {
+                o.put("bodyError", record.bodyError);
+            }
             if (record.altered) {
                 o.put("altered", true);
             }
@@ -636,7 +765,7 @@ public final class HookRegistry {
     public static Map<String, String> snapshot() {
         Map<String, String> out = new LinkedHashMap<>();
         for (Entry entry : HOOKS.values()) {
-            out.put(entry.key(), entry.rule.describe());
+            out.put(entry.key(), entry.effect());
         }
         return out;
     }

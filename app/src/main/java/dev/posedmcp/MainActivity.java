@@ -4,6 +4,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
 import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Build;
@@ -41,13 +42,15 @@ import dev.posedmcp.Logx;
 import dev.posedmcp.a11y.AccessibilityBridge;
 import dev.posedmcp.ipc.BridgeCredentials;
 import dev.posedmcp.mcp.McpTool;
+import dev.posedmcp.state.HookStore;
 import dev.posedmcp.state.Prefs;
+import dev.posedmcp.state.SavedHook;
 import dev.posedmcp.state.SavedScript;
 import dev.posedmcp.state.ScriptStore;
 import dev.posedmcp.xposed.LuaRuntime;
 
 /**
- * Status, controls and the automation library.
+ * Status, the automation library, and the hooks that are kept.
  *
  * <p>Material 3 throughout: the screen is the only surface this app draws, and a
  * plain grey list next to an agent's worth of capability looked like a debug
@@ -63,9 +66,13 @@ public class MainActivity extends AppCompatActivity {
     private View root;
     private LinearLayout statusContent;
     private LinearLayout scriptsContent;
+    private LinearLayout hooksContent;
     private ScrollView statusScroll;
     private ScrollView scriptsScroll;
+    private ScrollView hooksScroll;
     private FrameLayout tabContent;
+    /** Which apps are open on the hook page. Collapsed by default. */
+    private final java.util.Set<String> expandedApps = new java.util.LinkedHashSet<>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -79,8 +86,10 @@ public class MainActivity extends AppCompatActivity {
 
         statusContent = column();
         scriptsContent = column();
+        hooksContent = column();
         statusScroll = scrolled(statusContent);
         scriptsScroll = scrolled(scriptsContent);
+        hooksScroll = scrolled(hooksContent);
 
         MaterialToolbar toolbar = new MaterialToolbar(this);
         toolbar.setTitle(R.string.app_name);
@@ -90,6 +99,7 @@ public class MainActivity extends AppCompatActivity {
         tabs.setTabGravity(TabLayout.GRAVITY_FILL);
         tabs.addTab(tabs.newTab().setText("Status"));
         tabs.addTab(tabs.newTab().setText("Scripts"));
+        tabs.addTab(tabs.newTab().setText("Hooks"));
         tabs.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
             @Override
             public void onTabSelected(TabLayout.Tab tab) {
@@ -134,11 +144,12 @@ public class MainActivity extends AppCompatActivity {
         super.onResume();
         renderStatus();
         renderScripts();
+        renderHooks();
     }
 
     private void selectTab(int index) {
         tabContent.removeAllViews();
-        tabContent.addView(index == 0 ? statusScroll : scriptsScroll);
+        tabContent.addView(index == 0 ? statusScroll : index == 1 ? scriptsScroll : hooksScroll);
     }
 
     // ---- status tab --------------------------------------------------------
@@ -475,6 +486,221 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
+    // ---- hooks tab ---------------------------------------------------------
+
+    private void renderHooks() {
+        hooksContent.removeAllViews();
+        hooksContent.addView(headline("Kept hooks"));
+        hooksContent.addView(body("Hooks the agent registered and you kept. Unlike a hook you"
+                + " watch for a minute, these are put back into the app automatically every time"
+                + " it starts - so this page is where you see what is running without asking"
+                + " again, and where you stop it. Switching one off or deleting it reaches into"
+                + " the app that is running now, not just the record."));
+
+        HookStore store = HookStore.of(this);
+        List<String> packages = store.packages();
+        if (packages.isEmpty()) {
+            hooksContent.addView(section("NOTHING REGISTERED YET"));
+            hooksContent.addView(body("Ask the agent to hook a method and it appears here,"
+                    + " grouped by the application it lives in."));
+            return;
+        }
+
+        hooksContent.addView(section(packages.size() + (packages.size() == 1 ? " APP" : " APPS")));
+        for (String pkg : packages) {
+            hooksContent.addView(hookCard(pkg, store.forPackage(pkg)));
+        }
+    }
+
+    private View hookCard(String pkg, List<SavedHook> hooks) {
+        MaterialCardView card = new MaterialCardView(this);
+        card.setCardElevation(dp(1));
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        cardParams.topMargin = dp(12);
+        card.setLayoutParams(cardParams);
+
+        LinearLayout inner = new LinearLayout(this);
+        inner.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(16);
+        inner.setPadding(pad, pad, pad, dp(12));
+
+        boolean expanded = expandedApps.contains(pkg);
+        int on = 0;
+        for (SavedHook hook : hooks) {
+            if (hook.enabled) {
+                on++;
+            }
+        }
+
+        // A Button rather than a clickable TextView: a short synthetic tap is
+        // ignored by a plain TextView's click handling on this ROM.
+        MaterialButton header = tonalButton((expanded ? "▾  " : "▸  ") + appLabel(pkg)
+                + "   ·   " + on + " of " + hooks.size() + " on", v -> {
+            if (expandedApps.contains(pkg)) {
+                expandedApps.remove(pkg);
+            } else {
+                expandedApps.add(pkg);
+            }
+            renderHooks();
+        });
+        header.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        header.setGravity(Gravity.START);
+        inner.addView(header);
+        inner.addView(caption(pkg));
+
+        if (expanded) {
+            for (SavedHook hook : hooks) {
+                inner.addView(hookBlock(hook));
+            }
+        }
+
+        card.addView(inner);
+        return card;
+    }
+
+    private View hookBlock(SavedHook hook) {
+        LinearLayout block = new LinearLayout(this);
+        block.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(16);
+        block.setLayoutParams(lp);
+
+        // What kind of hook this is, and what its body can do. "dex" is the only
+        // layer there is; the field is here because the next one is native.
+        block.addView(caption(hook.layer.toUpperCase(java.util.Locale.ROOT) + "  ·  "
+                + hook.body.toUpperCase(java.util.Locale.ROOT)));
+        TextView target = monoBlock(hook.target());
+        target.setTextAppearance(com.google.android.material.R.style
+                .TextAppearance_Material3_BodyMedium);
+        target.setTypeface(Typeface.MONOSPACE);
+        block.addView(target);
+        if (hook.effect != null && !hook.effect.isEmpty()) {
+            block.addView(body(hook.effect));
+        }
+        block.addView(caption(statusLine(hook)));
+
+        LinearLayout actions = row();
+        actions.addView(toggle(hook.enabled,
+                checked -> setHookEnabled(hook, checked)));
+        if (SavedHook.BODY_LUA.equals(hook.body)) {
+            actions.addView(tonalButton("Source", v -> showHookSource(hook)));
+        }
+        actions.addView(outlinedButton("Delete", v -> confirmDeleteHook(hook)));
+        block.addView(actions);
+        return block;
+    }
+
+    private String statusLine(SavedHook hook) {
+        if (!hook.enabled) {
+            return "off — kept, but not put into the app";
+        }
+        if (hook.lastError != null && !hook.lastError.isEmpty()) {
+            return "FAILED — " + trim(hook.lastError, 200);
+        }
+        if (hook.lastAppliedAt == 0) {
+            return "on — not armed yet; it goes in when the app next starts";
+        }
+        return "on — last armed " + DateFormat.getDateTimeInstance(DateFormat.SHORT,
+                DateFormat.SHORT).format(new Date(hook.lastAppliedAt));
+    }
+
+    /**
+     * Turns a hook on or off, and makes the running app agree.
+     *
+     * <p>Off is the one that matters: the point of this page is that the user can
+     * stop something that is otherwise re-arming itself, so the switch has to
+     * reach into the process rather than only edit a record.
+     */
+    private void setHookEnabled(SavedHook hook, boolean enabled) {
+        HookStore.of(this).setEnabled(hook.id, enabled);
+        McpService service = McpService.instance();
+        if (service == null || !service.isRunning() || !service.hasAppPeer(hook.packageName)) {
+            toast(enabled
+                    ? "Saved. It will be armed when the app next starts."
+                    : "Saved. The app is not running, so there was nothing to stop.");
+            renderHooks();
+            return;
+        }
+
+        new Thread(() -> {
+            String message;
+            try {
+                if (enabled) {
+                    JSONObject result = service.armHook(hook);
+                    int applied = result == null ? 0 : result.optInt("applied", 0);
+                    message = applied > 0 ? "Armed in " + applied + " process(es)"
+                            : "Saved, but no process took it";
+                } else {
+                    service.disarmHook(hook);
+                    message = "Stopped in the running app";
+                }
+            } catch (Throwable t) {
+                message = "Could not reach the app: " + t.getMessage();
+            }
+            String finalMessage = message;
+            runOnUiThread(() -> {
+                toast(finalMessage);
+                renderHooks();
+            });
+        }, "posedmcp-hook-toggle").start();
+    }
+
+    private void confirmDeleteHook(SavedHook hook) {
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("Delete this hook?")
+                .setMessage(hook.target() + "\n\nIt is removed from the library and unhooked in"
+                        + " the running app. It will not come back when the app restarts.")
+                .setPositiveButton("Delete", (dialog, which) -> {
+                    HookStore.of(this).delete(hook.id);
+                    McpService service = McpService.instance();
+                    if (service != null && service.isRunning()
+                            && service.hasAppPeer(hook.packageName)) {
+                        new Thread(() -> {
+                            try {
+                                service.disarmHook(hook);
+                            } catch (Throwable t) {
+                                Logx.w("could not unhook " + hook.target() + ": " + t);
+                            }
+                            runOnUiThread(this::renderHooks);
+                        }, "posedmcp-hook-delete").start();
+                    } else {
+                        renderHooks();
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void showHookSource(SavedHook hook) {
+        TextView content = text(hook.source);
+        content.setTypeface(Typeface.MONOSPACE);
+        content.setTextSize(12);
+        content.setTextIsSelectable(true);
+        int pad = dp(20);
+        content.setPadding(pad, pad, pad, pad);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(content);
+
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(hook.target())
+                .setView(scroll)
+                .setPositiveButton("Close", null)
+                .show();
+    }
+
+    private String appLabel(String pkg) {
+        try {
+            ApplicationInfo info = getPackageManager().getApplicationInfo(pkg, 0);
+            String label = String.valueOf(getPackageManager().getApplicationLabel(info));
+            return label.equals(pkg) ? pkg : label;
+        } catch (Throwable t) {
+            return pkg;
+        }
+    }
+
     // ---- type scale --------------------------------------------------------
 
     private TextView headline(String value) {
@@ -631,6 +857,10 @@ public class MainActivity extends AppCompatActivity {
 
     private interface OnChecked {
         void onChecked(boolean checked);
+    }
+
+    private View toggle(boolean initial, OnChecked listener) {
+        return toggle("", initial, listener);
     }
 
     private View toggle(String label, boolean initial, OnChecked listener) {
