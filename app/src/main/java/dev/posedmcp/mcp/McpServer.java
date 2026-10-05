@@ -44,6 +44,10 @@ public final class McpServer {
             "   command and your stated reason. The user must tap approve. A refused or timed-out",
             "   request comes back as an error - report it plainly, do not retry the same command in a",
             "   loop, and never try to route around the confirmation with another tool.",
+            "   Do not treat that dialog as your safety net. It exists for the user to judge your",
+            "   command, not to catch your mistakes: assume every command you send may execute",
+            "   exactly as written, and never send one you would not stand behind if it ran the",
+            "   instant you sent it and nobody read it first.",
             "3. Always pass a specific, truthful reason. The user is deciding whether to run your",
             "   command; a vague reason is a reason to decline. Write it in the user's language.",
             "4. Do not batch unrelated commands into one shell string to reduce the number of prompts.",
@@ -377,6 +381,7 @@ public final class McpServer {
         final JSONObject finalArgs = args;
         try {
             return workers.submit(() -> {
+                ToolRegistry.enterTool(tool.name);
                 try {
                     JSONObject produced = tool.handler.call(finalArgs);
                     return produced == null ? McpTool.text("ok") : produced;
@@ -386,6 +391,8 @@ public final class McpServer {
                     Logx.e("tool " + tool.name + " failed", t);
                     return McpTool.error(tool.name + " failed: "
                             + (t.getMessage() == null ? t.toString() : t.getMessage()));
+                } finally {
+                    ToolRegistry.exitTool();
                 }
             }).get();
         } catch (InterruptedException e) {

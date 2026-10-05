@@ -95,10 +95,24 @@ public final class ConfirmationGate {
     public static final class Decision {
         public final boolean approved;
         public final String note;
+        /**
+         * Whether hand-off mode answered this, rather than the user.
+         *
+         * <p>Worth distinguishing from the other reasons a prompt is skipped: a
+         * relaxed setting is the user having said "stop asking me about this
+         * one", while hand-off is them having said "I am not here". Only the
+         * second one needs reporting back to them afterwards.
+         */
+        public final boolean viaHandoff;
 
         Decision(boolean approved, String note) {
+            this(approved, note, false);
+        }
+
+        Decision(boolean approved, String note, boolean viaHandoff) {
             this.approved = approved;
             this.note = note;
+            this.viaHandoff = viaHandoff;
         }
     }
 
@@ -174,7 +188,7 @@ public final class ConfirmationGate {
             Logx.i("confirmation[" + req.kind + "] AUTO-APPROVED by hand-off mode (" + left
                     + "): " + oneLine(req.detail, 200));
             return new Decision(true, "hand-off mode is armed (" + left
-                    + ") and covers every action, so this was not put to the user");
+                    + ") and covers every action, so this was not put to the user", true);
         }
 
         if (!isRequired(ctx, req.kind)) {

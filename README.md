@@ -158,7 +158,15 @@ So it is built to be hard to open, and hard to leave open by accident:
   carries the remaining time; and `module_status` reports it to the agent in full, because
   an agent that does not know it is running ungated will misjudge how much care its next
   call needs.
-- **Everything is still logged.** Each auto-approval writes an audit line naming the action
+- **It reports what is being done.** Every action taken through the open gate raises a
+  heads-up banner naming the tool and what it ran — so an unattended window is not an
+  unwatched one. Arming, disarming and the window running out each get their own banner,
+  and those are never rate-limited. The action banners are: one may interrupt every twelve
+  seconds, and the ones in between still update the notification silently and are counted
+  in the text ("and 3 more since the last banner"). An agent works in bursts and a phone
+  that buzzes forty times is a phone that gets muted, but a burst that ends inside one
+  window still leaves a correct record.
+- **And the log line stays.** Every auto-approval also writes to the log, naming the action
   and the time left. The decision is skipped; the record is not:
 
   ```
@@ -167,7 +175,16 @@ So it is built to be hard to open, and hard to leave open by accident:
   ```
 
 And the thing it does not change: **only the user can arm it.** There is no tool for it,
-so an agent cannot widen its own authority, and the prompt tells it so.
+so an agent cannot widen its own authority.
+
+**And the agent is deliberately not told.** It would be easy to report the state in
+`module_status`, and the first version did exactly that. It was taken back out: telling a
+model "nobody is checking right now" is precisely the context that invites it to take
+liberties. The opposite worry — an agent that lets the dialog do its thinking for it — is
+answered where it belongs, in the prompt, which now tells it to assume every command may
+execute exactly as written with nobody having read it, and that the dialog is not its
+safety net. So the agent sees a confirmation policy that says nothing about hand-off, and
+the guidance that makes that safe holds whether or not the mode is on.
 
 ### Root availability
 
@@ -627,13 +644,29 @@ Zygisk-LSPosed 1.10.2 (7182):
   `uid=0` in 103 ms with no dialog**; `module_status` reporting `HAND_OFF_MODE` to the agent
   with the time left; the audit lines above; turning it off restoring the gate; and a service
   restart clearing it
+- **The banners**: "Hand-off mode is ON" on arming; a burst of four root commands produced one
+  banner reading `echo burst-4` / `(and 2 more since the last banner)`, so the burst is folded
+  rather than machine-gunned and nothing is lost from the record; "Hand-off mode is off
+  (turned off in the app)"; and "Hand-off mode is off (the service restarted)" after killing
+  the process, which also showed that posting from the service's `onCreate` does not disturb
+  the foreground-service startup. And the negative case: with hand-off **off** and the
+  screen-capture confirmation relaxed, `screen_capture` ran with no prompt and posted **no**
+  banner — the reports are scoped to hand-off, not to "anything that happened without a
+  prompt"
 
 ### Not yet verified
 
 - **Hand-off mode's expiry has not been watched to the end.** Everything around it was: the
   countdown ticks, `module_status` flips on the same comparison, and a restart clears it. But
   sitting on an open gate for a full fifteen minutes to watch the timer reach zero is not a
-  good trade, so that last step is reasoned rather than observed.
+  good trade, so that last step is reasoned rather than observed. The "the window ran out"
+  banner is on that same path and is likewise unseen.
+- **Whether the skipped banners really stay silent is not observable from here.** The folding
+  is verified — the text of the fourth call carries the count of the ones before it — but
+  whether an intermediate update re-raises a heads-up is the system's documented behaviour of
+  `setOnlyAlertOnce`, and `adb` cannot tell you whether a phone buzzed. If it turns out to
+  re-alert, the symptom is four banners instead of one: noisy, not unsafe, and one flag to
+  change.
 - **A Lua hook's `set_result` / `set_arg` / `set_field` has no dedicated test.** The half that
   actually *changes* behaviour rather than observing it is plainly in use — several of the
   Coolapk effects are behavioural, and returning nil from `getDetailSponsorCard` cannot be

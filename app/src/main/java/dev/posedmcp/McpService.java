@@ -23,6 +23,7 @@ import dev.posedmcp.ipc.BridgeServer;
 import dev.posedmcp.mcp.McpServer;
 import dev.posedmcp.mcp.McpTool;
 import dev.posedmcp.mcp.ToolRegistry;
+import dev.posedmcp.root.AuditNotifier;
 import dev.posedmcp.root.ConfirmationGate;
 import dev.posedmcp.state.DeviceStatus;
 import dev.posedmcp.state.EventStore;
@@ -63,11 +64,17 @@ public final class McpService extends Service {
         @Override
         public void run() {
             boolean armed = !ConfirmationGate.handoffLeft(McpService.this).isEmpty();
-            // Refreshed while it is armed so the countdown stays roughly honest,
-            // and once more when it lapses so the notification stops claiming a
-            // mode that is over.
-            if (armed || armed != handoffWasArmed) {
+            if (armed != handoffWasArmed) {
+                if (!armed) {
+                    // The window closed on its own. This is the case the user is
+                    // definitely not watching for, and therefore the one they most
+                    // need telling about.
+                    AuditNotifier.handoffEnded(McpService.this, "the window ran out");
+                }
                 handoffWasArmed = armed;
+                updateNotification();
+            } else if (armed) {
+                // Keep the countdown in the notification roughly honest.
                 updateNotification();
             }
             handler.postDelayed(this, HANDOFF_TICK_MS);
@@ -115,6 +122,8 @@ public final class McpService extends Service {
         if (prefs.handoffUntil() != 0L) {
             Logx.i("hand-off mode cleared: the service restarted");
             prefs.clearHandoff();
+            handoffWasArmed = false;
+            AuditNotifier.handoffEnded(this, "the service restarted");
         }
         // Mirror the bridge credentials where hooked processes can reach them.
         BridgeCredentials.publish(this, prefs.bridgeToken(), prefs.bridgePort());
@@ -377,7 +386,8 @@ public final class McpService extends Service {
         prefs.setHandoffUntil(System.currentTimeMillis() + durationMs);
         Logx.w("HAND-OFF MODE ARMED for " + (durationMs / 60_000L) + " min - every tool now"
                 + " runs without asking");
-        handoffWasArmed = false;
+        handoffWasArmed = true;
+        AuditNotifier.handoffArmed(this, durationMs);
         updateNotification();
     }
 
@@ -389,6 +399,7 @@ public final class McpService extends Service {
         prefs.clearHandoff();
         Logx.i("hand-off mode turned off");
         handoffWasArmed = false;
+        AuditNotifier.handoffEnded(this, "turned off in the app");
         updateNotification();
     }
 

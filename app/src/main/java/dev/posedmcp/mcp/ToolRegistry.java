@@ -29,6 +29,7 @@ import dev.posedmcp.a11y.AccessibilityBridge;
 import dev.posedmcp.dex.ApkInfo;
 import dev.posedmcp.dex.DexClient;
 import dev.posedmcp.ipc.BridgeServer;
+import dev.posedmcp.root.AuditNotifier;
 import dev.posedmcp.root.ConfirmationGate;
 import dev.posedmcp.root.RootShell;
 import dev.posedmcp.state.DeviceStatus;
@@ -77,6 +78,24 @@ public final class ToolRegistry {
 
     /** Set from the MCP handshake so prompts can name the agent that asked. */
     private static final AtomicReference<String> REQUESTER = new AtomicReference<>("an MCP client");
+
+    /**
+     * The tool running on this thread, so a notification can name it.
+     *
+     * <p>Carried here rather than threaded through every handler: the tool is
+     * known where the call is dispatched, and the gate that needs it is several
+     * frames down a lambda that already takes four arguments.
+     */
+    private static final ThreadLocal<String> CURRENT_TOOL = new ThreadLocal<>();
+
+    /** Called by the dispatcher around each tool call, on the worker thread. */
+    public static void enterTool(String name) {
+        CURRENT_TOOL.set(name);
+    }
+
+    public static void exitTool() {
+        CURRENT_TOOL.remove();
+    }
 
     public ToolRegistry(Context context, Prefs prefs, Capabilities capabilities, BridgeServer bridge,
             EventStore events) {
@@ -1406,6 +1425,14 @@ public final class ToolRegistry {
                     + ". The action was not performed. Ask the user what they would prefer"
                     + " instead of retrying.");
         }
+        if (decision.viaHandoff) {
+            // Hand-off mode answered this, so the user saw nothing. The banner is
+            // the whole report: without it, a 15-minute window of unattended root
+            // access leaves no trace they would ever run into.
+            String tool = CURRENT_TOOL.get();
+            AuditNotifier.action(context, tool == null ? kind.name().toLowerCase(Locale.ROOT) : tool,
+                    detail);
+        }
         if (willPrompt) {
             // The approval window is gone as far as the window manager is
             // concerned the instant the user taps the button, but the display is
@@ -1488,16 +1515,11 @@ public final class ToolRegistry {
             o.put("plugin_load/plugin_invoke", prefs.confirmPlugin() ? "prompts" : "not prompted");
             o.put("lua_exec", prefs.confirmPlugin() ? "prompts" : "not prompted");
             o.put("confirmTimeoutMs", prefs.confirmTimeoutMs());
-
-            // Stated last and in full, because it overrides every line above it
-            // and an agent that does not know it is running ungated will
-            // misjudge how much care its next call needs.
-            String left = ConfirmationGate.handoffLeft(context);
-            if (!left.isEmpty()) {
-                o.put("HAND_OFF_MODE", "ARMED - " + left + ". Nothing is being put to the"
-                        + " user; every action runs as soon as it is asked for, including"
-                        + " root shell commands. Only the user can arm this, from the app.");
-            }
+            // Hand-off mode is deliberately not reported here. Telling the agent
+            // "nobody is checking right now" is exactly the context that invites
+            // it to take liberties, and the caveat is covered from the other
+            // side instead: the prompt tells it to treat its own judgement as the
+            // last line of defence, never the dialog. See the README.
         } catch (Throwable ignored) {
         }
         return o;
