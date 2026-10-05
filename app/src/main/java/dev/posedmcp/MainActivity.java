@@ -339,8 +339,10 @@ public class MainActivity extends AppCompatActivity {
             statusContent.addView(handoffStatus);
             statusContent.addView(body("Every tool the agent calls is running the moment it is"
                     + " asked for, with nothing checking it first - root shell commands"
-                    + " included. It switches itself off when the time runs out, and restarting"
-                    + " the service clears it."));
+                    + " included. It switches itself off when the time runs out, and a reboot"
+                    + " ends it early. This app being killed and restarted does not - this ROM"
+                    + " does that on its own, and losing the window to a memory sweep would help"
+                    + " nobody."));
 
             LinearLayout actions = row();
             actions.addView(tonalButton("Extend " + (Prefs.HANDOFF_EXTEND_MS / 60_000L) + " min",

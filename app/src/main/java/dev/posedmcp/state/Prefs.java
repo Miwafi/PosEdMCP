@@ -27,6 +27,10 @@ public final class Prefs {
     private static final String KEY_EXEC_TIMEOUT = "exec_timeout_ms";
     private static final String KEY_AUTOSTART = "autostart";
     private static final String KEY_HANDOFF_UNTIL = "handoff_until";
+    private static final String KEY_HANDOFF_BOOT = "handoff_boot";
+
+    /** How far the boot wall-clock has to move before it counts as a reboot. */
+    private static final long BOOT_SLACK_MS = 120_000L;
 
     public static final int DEFAULT_MCP_PORT = 8765;
     public static final int DEFAULT_BRIDGE_PORT = 8766;
@@ -164,18 +168,42 @@ public final class Prefs {
      * a value the gate would not see.
      */
     public void setHandoffUntil(long epochMillis) {
-        sp.edit().putLong(KEY_HANDOFF_UNTIL, epochMillis).commit();
+        sp.edit()
+                .putLong(KEY_HANDOFF_UNTIL, epochMillis)
+                .putLong(KEY_HANDOFF_BOOT, bootWallClock())
+                .commit();
     }
 
     /** Ends hand-off mode now. */
     public void clearHandoff() {
-        sp.edit().remove(KEY_HANDOFF_UNTIL).commit();
+        sp.edit().remove(KEY_HANDOFF_UNTIL).remove(KEY_HANDOFF_BOOT).commit();
     }
 
     /** Milliseconds of hand-off mode left; 0 or less when it is off or lapsed. */
     public long handoffRemainingMs() {
         long until = handoffUntil();
         return until <= 0L ? 0L : until - System.currentTimeMillis();
+    }
+
+    /**
+     * Whether the device has rebooted since hand-off was armed.
+     *
+     * <p>This is the whole reason the boot time is written down. A wall-clock
+     * deadline survives the process being killed and restarted, which on this
+     * ROM is routine — its own memory sweeper takes this app out mid-session and
+     * the accessibility binding has it back a second later. Treating that as the
+     * end of the session meant a routine sweep silently spent the user's
+     * remaining minutes, so a process restart now changes nothing and a reboot
+     * ends the window, which is what the two actually mean.
+     */
+    public boolean handoffCrossesReboot() {
+        long armedAt = sp.getLong(KEY_HANDOFF_BOOT, 0L);
+        return armedAt == 0L || Math.abs(bootWallClock() - armedAt) > BOOT_SLACK_MS;
+    }
+
+    /** Wall-clock time this device booted, as far as this process can tell. */
+    private static long bootWallClock() {
+        return System.currentTimeMillis() - android.os.SystemClock.elapsedRealtime();
     }
 
     public boolean autostart() {

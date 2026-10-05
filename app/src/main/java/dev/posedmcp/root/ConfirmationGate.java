@@ -158,12 +158,22 @@ public final class ConfirmationGate {
      * instead. It is what the overlay-settle delay keys off.
      */
     public static boolean willPrompt(Context ctx, Kind kind) {
-        return Prefs.of(ctx).handoffRemainingMs() <= 0L && isRequired(ctx, kind);
+        // Asks handoffLeft rather than the raw deadline, so the reboot check
+        // happens here too and the two cannot disagree.
+        return handoffLeft(ctx).isEmpty() && isRequired(ctx, kind);
     }
 
     /** Hand-off mode's remaining time in words, or empty when it is off. */
     public static String handoffLeft(Context ctx) {
-        long remaining = Prefs.of(ctx).handoffRemainingMs();
+        Prefs prefs = Prefs.of(ctx);
+        if (prefs.handoffCrossesReboot()) {
+            // A reboot ends the window, and this is where it is noticed. Every
+            // reader of the gate comes through here, so nothing can act on a
+            // session that a restart has already invalidated.
+            prefs.clearHandoff();
+            return "";
+        }
+        long remaining = prefs.handoffRemainingMs();
         if (remaining <= 0L) {
             return "";
         }

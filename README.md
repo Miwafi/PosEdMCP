@@ -120,6 +120,15 @@ Unrestricted battery (the **Battery** button in the app) is still worth doing, a
 ColorOS you may additionally need to allow background activity for PosEdMCP under
 Settings → Battery → App battery management — but **that alone is not enough**.
 
+> **On this ROM the app can also be killed outright, accessibility binding and all.**
+> Measured mid-session: `OplusClearSystemService` reaped both of this app's processes under
+> `powersavemode(kill-res)`, along with the notification manager and several other things,
+> and the accessibility binding brought them back about a second and a half later. The
+> binding is what keeps the app *unfrozen*; it does not make it unkillable. The visible
+> symptom is the MCP endpoint refusing connections for those couple of seconds and any
+> hooked app's bridge dropping — which looks like a crash and is not one. If it happens
+> often, the battery settings above are the lever worth pulling.
+
 ### Confirmation policy: what to relax, and what never to
 
 `input_inject`, `screen_capture` and `ui_dump` prompt by default. That is unusable for UI
@@ -152,12 +161,16 @@ So it is built to be hard to open, and hard to leave open by accident:
   pocket, a mis-tap or a stray touch cannot open this; only a person reading it can.
 - **It expires.** Fifteen minutes by default, extendable five at a time, deliberately and
   by hand. There is no "always on".
-- **A restart clears it.** Turning the service off and on, or rebooting, ends the session.
-  It is armed for a sitting, not configured.
-- **It says so, in three places.** The status tab counts down; the permanent notification
-  carries the remaining time; and `module_status` reports it to the agent in full, because
-  an agent that does not know it is running ungated will misjudge how much care its next
-  call needs.
+- **A reboot clears it — but the app being killed does not.** This ROM kills apps on its own
+  schedule. Measured, mid-session: `OplusClearSystemService` took both of this app's processes
+  out under `powersavemode(kill-res)`, the accessibility binding had them back a second later,
+  and the remaining minutes of the window were gone with them. Losing the session to a routine
+  memory sweep helps nobody, so the deadline is a wall-clock time that survives a process
+  restart, and the boot time is written beside it — that is what tells a reboot, the thing
+  that should end it, apart from the ROM being itself.
+- **It says so, twice.** The status tab counts down from the moment it is armed, and the
+  permanent notification carries the remaining time. Not a third time, and that is on
+  purpose: see below for why the agent is told nothing.
 - **It reports what is being done.** Every action taken through the open gate raises a
   heads-up banner naming the tool and what it ran — so an unattended window is not an
   unwatched one. Arming, disarming and the window running out each get their own banner,
@@ -653,6 +666,10 @@ Zygisk-LSPosed 1.10.2 (7182):
   screen-capture confirmation relaxed, `screen_capture` ran with no prompt and posted **no**
   banner — the reports are scoped to hand-off, not to "anything that happened without a
   prompt"
+- **The window outlives the app being killed, and not a reboot.** Armed, then the process
+  killed — which is exactly what this ROM had done to it — the countdown came back where it
+  was (`ON — 14:21 left` after the restart). The boot time written beside the deadline is
+  what keeps a reboot, which should end it, in a different category.
 
 ### Not yet verified
 
@@ -660,7 +677,9 @@ Zygisk-LSPosed 1.10.2 (7182):
   countdown ticks, `module_status` flips on the same comparison, and a restart clears it. But
   sitting on an open gate for a full fifteen minutes to watch the timer reach zero is not a
   good trade, so that last step is reasoned rather than observed. The "the window ran out"
-  banner is on that same path and is likewise unseen.
+  banner is on that same path and is likewise unseen. (The one attempt ended early for a
+  better reason: the ROM killed the app eight minutes in, which is what turned up the restart
+  flaw described above.)
 - **Whether the skipped banners really stay silent is not observable from here.** The folding
   is verified — the text of the fourth call carries the count of the ones before it — but
   whether an intermediate update re-raises a heads-up is the system's documented behaviour of

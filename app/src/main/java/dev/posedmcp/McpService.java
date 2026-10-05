@@ -114,16 +114,18 @@ public final class McpService extends Service {
         HiddenApi.exempt();
         // Synchronously, before anything can read a token or start a listener.
         prefs.ensureTokens();
-        // Hand-off mode never survives the service going down. It is armed for a
-        // sitting, in front of a user who is right there; a restart means they
-        // are not, and a window nobody remembers opening is the exact failure
-        // this mode has to avoid. Clearing here also covers a reboot, since the
-        // service comes back up with the device.
-        if (prefs.handoffUntil() != 0L) {
-            Logx.i("hand-off mode cleared: the service restarted");
+        // Hand-off mode is deliberately NOT cleared here. This ROM kills the app
+        // on its own schedule - measured, its memory sweeper took both of this
+        // app's processes out mid-session under "powersavemode(kill-res)" - and
+        // the accessibility binding brought it straight back. Treating every
+        // restart as the end of the session meant a routine sweep silently spent
+        // the user's remaining minutes. A reboot is the thing that ends it, and
+        // the gate notices that itself; all that is left to do here is say so.
+        if (prefs.handoffUntil() != 0L && prefs.handoffCrossesReboot()) {
+            Logx.i("hand-off mode cleared: the device has rebooted since it was armed");
             prefs.clearHandoff();
             handoffWasArmed = false;
-            AuditNotifier.handoffEnded(this, "the service restarted");
+            AuditNotifier.handoffEnded(this, "the device rebooted");
         }
         // Mirror the bridge credentials where hooked processes can reach them.
         BridgeCredentials.publish(this, prefs.bridgeToken(), prefs.bridgePort());
