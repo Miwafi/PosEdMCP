@@ -268,6 +268,12 @@ public final class McpService extends Service {
         return registry.runScript(pkg, source, maxInstructions);
     }
 
+    /** Whether a module inside that package is currently reachable over the bridge. */
+    public boolean hasAppPeer(String pkg) {
+        BridgeServer server = bridge;
+        return server != null && server.hasAppPeer(pkg);
+    }
+
     /** The registered tools, so the status tab lists what actually exists. */
     public List<McpTool> tools() {
         ToolRegistry registry = tools;

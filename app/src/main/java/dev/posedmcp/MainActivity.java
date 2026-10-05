@@ -37,6 +37,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 
+import dev.posedmcp.Logx;
 import dev.posedmcp.a11y.AccessibilityBridge;
 import dev.posedmcp.ipc.BridgeCredentials;
 import dev.posedmcp.mcp.McpTool;
@@ -341,13 +342,38 @@ public class MainActivity extends AppCompatActivity {
             toast("Start the service first");
             return;
         }
+        // Running a script means bringing its app forward, which puts this one in
+        // the background. Without the accessibility service the platform freezes
+        // it there within seconds, mid-request, and the run never finishes - so
+        // say why rather than let it fail in a way that looks like the script.
+        if (!AccessibilityBridge.isConnected()) {
+            new MaterialAlertDialogBuilder(this)
+                    .setTitle("Accessibility is off")
+                    .setMessage("Running a script brings its app to the front, which puts this"
+                            + " one in the background. Without the accessibility service the"
+                            + " system freezes this app there and the run never finishes."
+                            + " Turn it on, then run again.")
+                    .setPositiveButton("Accessibility settings", (dialog, which) -> {
+                        try {
+                            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                        } catch (Throwable t) {
+                            toast("Could not open accessibility settings");
+                        }
+                    })
+                    .setNegativeButton("Cancel", null)
+                    .show();
+            return;
+        }
+
         toast("Running " + script.name);
         // The bridge call blocks until the script finishes, so it cannot be on
-        // the thread drawing this screen.
+        // the thread drawing this screen. Bringing the target forward happens on
+        // this thread because starting an activity has to.
         new Thread(() -> {
             boolean ok;
             String summary;
             try {
+                bringToFront(script.packageName);
                 JSONObject result = service.runScript(script.packageName, script.source,
                         LuaRuntime.DEFAULT_MAX_INSTRUCTIONS);
                 ok = result.optBoolean("ok", false);
@@ -359,6 +385,48 @@ public class MainActivity extends AppCompatActivity {
             ScriptStore.of(this).recordRun(script.id, ok, trim(summary, 400));
             runOnUiThread(this::renderScripts);
         }, "posedmcp-script-run").start();
+    }
+
+    /**
+     * Starts the target app and waits for its module to answer.
+     *
+     * <p>A backgrounded app is frozen within seconds on this ROM and a frozen
+     * process does not answer the bridge, so a script that ran anyway would just
+     * time out. Cold-starting it also takes a moment before the module inside it
+     * connects, which is what the wait is for.
+     */
+    private void bringToFront(String pkg) {
+        Intent intent = getPackageManager().getLaunchIntentForPackage(pkg);
+        if (intent != null) {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+            try {
+                startActivity(intent);
+            } catch (Throwable t) {
+                Logx.w("could not bring " + pkg + " to the front: " + t);
+            }
+        }
+        McpService service = McpService.instance();
+        // A cold start has to fork the process, run the app's own startup and
+        // then let the module inside it connect, which on this device takes
+        // longer than it looks - the first attempt at six seconds was not enough.
+        for (int i = 0; i < 60; i++) {
+            if (service == null || service.hasAppPeer(pkg)) {
+                break;
+            }
+            try {
+                Thread.sleep(250L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        // Even with the module already attached, the window needs a beat to come
+        // up and for the platform to unfreeze the process behind it.
+        try {
+            Thread.sleep(700L);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /** What the user needs to see: the value or the text it printed, or why it failed. */
