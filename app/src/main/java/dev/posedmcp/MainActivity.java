@@ -15,6 +15,7 @@ import android.text.InputType;
 import android.text.TextWatcher;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -34,7 +35,10 @@ import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.color.DynamicColors;
 import com.google.android.material.color.MaterialColors;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import com.google.android.material.imageview.ShapeableImageView;
 import com.google.android.material.materialswitch.MaterialSwitch;
+import com.google.android.material.shape.CornerFamily;
+import com.google.android.material.shape.ShapeAppearanceModel;
 import com.google.android.material.tabs.TabLayout;
 
 import org.json.JSONObject;
@@ -169,6 +173,22 @@ public class MainActivity extends AppCompatActivity {
                 0, 1f));
         root = layout;
         setContentView(layout);
+
+        // After setContentView, so the tint is resolved against a view that is
+        // already carrying the theme.
+        toolbar.inflateMenu(R.menu.main);
+        MenuItem about = toolbar.getMenu().findItem(R.id.action_about);
+        if (about != null && about.getIcon() != null) {
+            about.getIcon().setTint(color(com.google.android.material.R.attr.colorOnSurface));
+        }
+        toolbar.setOnMenuItemClickListener(item -> {
+            if (item.getItemId() == R.id.action_about) {
+                showAbout();
+                return true;
+            }
+            return false;
+        });
+
         selectTab(0);
 
         ensureNotificationPermission();
@@ -197,6 +217,109 @@ public class MainActivity extends AppCompatActivity {
     private void selectTab(int index) {
         tabContent.removeAllViews();
         tabContent.addView(index == 0 ? statusScroll : index == 1 ? scriptsScroll : hooksScroll);
+    }
+
+    // ---- about -------------------------------------------------------------
+
+    private static final String PROFILE_ID = "YunQingLT";
+    private static final String PROJECT_URL = "https://github.com/yunqinglt/PosEdMCP";
+
+    /**
+     * Who made this, where it lives, and which framework is running it.
+     *
+     * <p>The framework line is the one that earns its place. This app is loaded
+     * by one of two Xposed generations, they differ in ways that have already
+     * cost real time here, and until now the only way to find out which one a
+     * handset was on was to read a log. The answer comes from a module instance,
+     * because that is the only thing that knows what actually got injected -
+     * this process cannot even see the module's own classes.
+     */
+    private void showAbout() {
+        LinearLayout content = column();
+        content.setGravity(Gravity.CENTER_HORIZONTAL);
+        content.setPadding(dp(24), dp(12), dp(24), 0);
+
+        ShapeableImageView avatar = new ShapeableImageView(this);
+        avatar.setImageResource(R.drawable.myprofile);
+        avatar.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
+        avatar.setShapeAppearanceModel(new ShapeAppearanceModel.Builder()
+                .setAllCorners(CornerFamily.ROUNDED, dp(64))
+                .build());
+        avatar.setLayoutParams(new LinearLayout.LayoutParams(dp(96), dp(96)));
+        content.addView(avatar);
+
+        TextView who = title(PROFILE_ID);
+        who.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams whoParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        whoParams.topMargin = dp(12);
+        who.setLayoutParams(whoParams);
+        content.addView(who);
+
+        TextView project = body(PROJECT_URL);
+        project.setGravity(Gravity.CENTER);
+        project.setTextColor(color(androidx.appcompat.R.attr.colorPrimary));
+        project.setPaintFlags(project.getPaintFlags() | android.graphics.Paint.UNDERLINE_TEXT_FLAG);
+        project.setOnClickListener(v -> openUrl(PROJECT_URL));
+        content.addView(project);
+
+        TextView heading = section("ACTIVE FRAMEWORK");
+        heading.setGravity(Gravity.CENTER);
+        content.addView(heading);
+
+        final TextView framework = title(frameworkLine());
+        framework.setGravity(Gravity.CENTER);
+        content.addView(framework);
+
+        final TextView source = caption(frameworkSource());
+        source.setGravity(Gravity.CENTER);
+        content.addView(source);
+
+        new MaterialAlertDialogBuilder(this)
+                .setView(content)
+                .setPositiveButton("Close", null)
+                .show();
+
+        // Asked for rather than waited on: the answer is a bridge round trip, and
+        // a dialog that opened half a second late would be worse than one that
+        // fills its last line in.
+        McpService service = McpService.instance();
+        if (service != null && service.isRunning()) {
+            new Thread(() -> {
+                service.refreshFramework();
+                runOnUiThread(() -> {
+                    framework.setText(frameworkLine());
+                    source.setText(frameworkSource());
+                });
+            }, "posedmcp-about").start();
+        }
+    }
+
+    private String frameworkLine() {
+        McpService service = McpService.instance();
+        if (service == null || !service.isRunning()) {
+            return "the service is not running";
+        }
+        String reported = service.frameworkReport();
+        return reported.isEmpty() ? "not reported yet" : reported;
+    }
+
+    private String frameworkSource() {
+        McpService service = McpService.instance();
+        String from = service == null ? "" : service.frameworkFrom();
+        if (!from.isEmpty()) {
+            return "reported by " + from;
+        }
+        return "start any application in this module's scope and it will say";
+    }
+
+    private void openUrl(String url) {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Throwable t) {
+            toast("Nothing on this device can open " + url);
+        }
     }
 
     // ---- status tab --------------------------------------------------------

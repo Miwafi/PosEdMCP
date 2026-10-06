@@ -39,7 +39,7 @@ public class PosEdMcpModule implements IXposedHookLoadPackage, IXposedHookZygote
             // Recorded before anything else, because it decides which HookApi
             // every later hook is built on - and this is a framework older than
             // the modern one, or the module would not have been started here.
-            Framework.adoptClassic("API " + XposedBridge.getXposedVersion());
+            Framework.adoptClassic("Xposed API " + XposedBridge.getXposedVersion());
 
             String packageName = lpparam.packageName;
             String processName = lpparam.processName;

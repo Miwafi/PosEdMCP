@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  app:showAsAction, not android:showAsAction. Only the framework's own ActionBar
+  honours the android namespace; a Toolbar reads the support-library attribute,
+  and without it the item silently lands in the overflow menu - which looks like
+  an icon that never got added.
+-->
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <item
+        android:id="@+id/action_about"
+        android:icon="@drawable/ic_about"
+        android:title="@string/about"
+        app:showAsAction="always" />
+</menu>

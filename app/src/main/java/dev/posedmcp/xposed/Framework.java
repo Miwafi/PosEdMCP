@@ -40,33 +40,41 @@ public final class Framework {
 
     private static volatile Backend backend = Backend.CLASSIC;
     private static volatile Hooks hooks = XposedHookApi::new;
-    private static volatile String version = "";
+    private static volatile String label = "";
 
     private Framework() {
     }
 
     /** Called by the classic entry, once per process. */
-    public static void adoptClassic(String reportedVersion) {
+    public static void adoptClassic(String reportedLabel) {
         backend = Backend.CLASSIC;
         hooks = XposedHookApi::new;
-        version = reportedVersion == null ? "" : reportedVersion;
+        label = reportedLabel == null ? "" : reportedLabel;
     }
 
     /** Called by the modern entry, once per process. */
-    public static void adoptLibXposed(Hooks factory, String reportedVersion) {
+    public static void adoptLibXposed(Hooks factory, String reportedLabel) {
         backend = Backend.LIBXPOSED;
         hooks = factory;
-        version = reportedVersion == null ? "" : reportedVersion;
+        label = reportedLabel == null ? "" : reportedLabel;
     }
 
     public static Backend backend() {
         return backend;
     }
 
-    /** One line for the log and for {@code module_status}. */
+    /**
+     * Which framework, and which of its two hook APIs this process is running on.
+     *
+     * <p>Both halves matter and they are not the same question. The first is the
+     * framework's own name and version, which only it can answer. The second is
+     * the API the hooks are built on - and on LSPosed those differ, because it
+     * loads this module through its modern entry while the hooks stay on the
+     * classic API it is actually good at.
+     */
     public static String describe() {
-        String name = backend == Backend.LIBXPOSED ? "libxposed" : "classic xposed";
-        return version.isEmpty() ? name : name + " " + version;
+        String what = label.isEmpty() ? "an unidentified framework" : label;
+        return what + " · " + (backend == Backend.LIBXPOSED ? "libxposed hooks" : "classic hooks");
     }
 
     public static HookApi hookApi(ClassLoader loader) {

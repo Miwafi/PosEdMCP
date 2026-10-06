@@ -68,8 +68,30 @@ public class VectorModule extends XposedModule {
     public VectorModule(XposedInterface base, ModuleLoadedParam param) {
         attachFrameworkAnyArity(base);
         processName = processNameOf(param);
-        Logx.i("loaded through java_init.list by an API 100 framework (" + processName
-                + ") - keeping the classic hook backend, which is that framework's own");
+        // Named as precisely as this framework can be named. Its own classes are
+        // the only source for that, and asking is worth a reflective call: on
+        // LSPosed this is what turns "classic xposed" into something a reader can
+        // act on.
+        String named = identifyFramework(base);
+        Framework.adoptClassic(named.isEmpty() ? "a pre-101 framework" : named);
+        Logx.i("loaded through java_init.list by " + (named.isEmpty() ? "a pre-101 framework" : named)
+                + " (" + processName + ") - keeping the classic hook backend, which is its own");
+    }
+
+    /** The framework's own name and version, or empty when it has no way to say. */
+    private static String identifyFramework(XposedInterface base) {
+        String name = "";
+        String version = "";
+        try {
+            name = base.getFrameworkName();
+        } catch (Throwable ignored) {
+            // A pre-101 framework may not have this at all.
+        }
+        try {
+            version = base.getFrameworkVersion();
+        } catch (Throwable ignored) {
+        }
+        return (name + " " + version).trim();
     }
 
     /**
@@ -133,26 +155,17 @@ public class VectorModule extends XposedModule {
 
     /** Never throws: a framework that is missing one of these is still usable. */
     private String describeFramework() {
-        String name = "";
-        String version = "";
+        String named = identifyFramework(this);
         int api = 0;
-        try {
-            name = getFrameworkName();
-        } catch (Throwable ignored) {
-        }
-        try {
-            version = getFrameworkVersion();
-        } catch (Throwable ignored) {
-        }
         try {
             api = getApiVersion();
         } catch (Throwable ignored) {
+            // Older than the method.
         }
-        StringBuilder text = new StringBuilder((name + " " + version).trim());
-        if (api > 0) {
-            text.append(text.length() == 0 ? "" : ", ").append("libxposed API ").append(api);
+        if (api <= 0) {
+            return named;
         }
-        return text.toString();
+        return named.isEmpty() ? "libxposed API " + api : named + ", libxposed API " + api;
     }
 
     private static String processNameOf(ModuleLoadedParam param) {

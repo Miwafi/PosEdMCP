@@ -284,7 +284,63 @@ public final class McpService extends Service {
         if (server == null) {
             return;
         }
+        refreshFramework();
         HookDeploy.deploy(this, server, peerKey, pkg, moduleApk());
+    }
+
+    // ---- which framework is loaded ----
+
+    /** What the last module instance said it was loaded by, and which process said it. */
+    private volatile String frameworkReport = "";
+    private volatile String frameworkFrom = "";
+
+    /**
+     * The framework a running module instance reported, or empty.
+     *
+     * <p>Asked of the module rather than worked out here, because this is the
+     * only answer that is about what is actually injected. The app process has
+     * neither Xposed API on its classpath - it cannot even see the module's own
+     * classes - so anything it concluded on its own would be about what is
+     * installed, not about what is running.
+     */
+    public String frameworkReport() {
+        return frameworkReport;
+    }
+
+    /** The process that answered, so the answer can be told apart from a leftover. */
+    public String frameworkFrom() {
+        return frameworkFrom;
+    }
+
+    /**
+     * Asks a connected module instance what loaded it.
+     *
+     * <p>Runs on whatever thread the caller is on: it does a bridge round trip,
+     * so never the main one. Answers are not required - a handset with nothing
+     * in scope yet simply keeps saying it does not know.
+     */
+    public void refreshFramework() {
+        BridgeServer server = bridge;
+        if (server == null) {
+            return;
+        }
+        for (String key : server.connectedKeys()) {
+            if (!key.startsWith(dev.posedmcp.ipc.Wire.ROLE_APP)) {
+                continue;
+            }
+            try {
+                org.json.JSONObject pong =
+                        server.request(key, "ping", new org.json.JSONObject(), 4_000L);
+                String reported = pong.optString("framework", "");
+                if (!reported.isEmpty()) {
+                    frameworkReport = reported;
+                    frameworkFrom = key;
+                    return;
+                }
+            } catch (Throwable ignored) {
+                // A process mid-start has nothing to say; try the next one.
+            }
+        }
     }
 
     /**

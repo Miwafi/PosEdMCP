@@ -205,7 +205,12 @@ POSEDMCP_TOKEN=<token> ./tools/mcp-call.sh '{"jsonrpc":"2.0","id":1,"method":"to
 ### 自动化页
 
 应用界面分三个 Tab：**Status**（服务状态、端点、确认策略、工具清单）、**Scripts** 和
-**Hooks**。
+**Hooks**。工具栏右侧有一个 **About** 按钮：作者、项目地址，以及——真正值钱的那一行——
+**当前到底是谁在运行这个模块**，连同它选的钩子 API。这个答案是从模块实例那里经桥问来的，
+不是应用自己判断的：本进程连模块自己的类都看不见，它能得出的只是"装了什么"，而那是另一个
+问题。在 LSPosed 上读作 `LSPosed 1.10.2 · classic hooks`；在 Vector 上读作
+`Vector 2.2, libxposed API 102 · libxposed hooks`。
+
 Scripts 页列出模型替你存下的脚本，每条显示名称、作用、目标应用，以及**上一次运行的结果**；
 可以打开看源码、运行、删除。
 

@@ -254,7 +254,14 @@ page is execution.
 ### The Scripts page
 
 The app's UI has three tabs: **Status** (service state, endpoint, confirmation policy, tool
-list), **Scripts** and **Hooks**.
+list), **Scripts** and **Hooks**. An **About** button sits at the right of the toolbar: the
+author, the project, and — the line that earns its place — **which framework is actually
+running this module**, with the hook API it chose. That answer comes from a module instance
+over the bridge rather than from anything the app works out itself, because this process
+cannot see the module's own classes; all it could conclude on its own is what is *installed*,
+which is not the same question. On LSPosed it reads `LSPosed 1.10.2 · classic hooks`; on
+Vector, `Vector 2.2, libxposed API 102 · libxposed hooks`.
+
 The Scripts tab lists the scripts the model filed for you, each showing its name, what it
 does, its target app, and **the result of the last run**; you can open the source, run it,
 or delete it.
