@@ -1,10 +1,20 @@
 # Module metadata for frameworks that speak the modern libxposed API (Vector).
 #
-# minApiVersion is deliberately below targetApiVersion: a framework older than
-# 102 can still load this module and simply does not offer the newer callbacks,
-# which is exactly how API versioning is meant to work. 100 is the first
-# libxposed API, so nothing older can read this file at all - those frameworks
-# keep loading the classic entry named in assets/xposed_init.
+# minApiVersion is 100 because both alternatives were measured on the older
+# framework, and only this one leaves the module alive on both devices:
+#
+#   101 - LSPosed 1.10.2 refuses the module outright ("this module requires a
+#         newer Xposed version (101), so it cannot be activated"). It does not
+#         fall back to assets/xposed_init.
+#   100 - it accepts the module, finds this entry through java_init.list, and
+#         then constructs it the pre-101 way, with (XposedInterface,
+#         ModuleLoadedParam) as constructor arguments. Without that constructor
+#         it dies with NoSuchMethodException and, again, does not fall back -
+#         which leaves the module loaded nowhere.
+#
+# So 100 plus a constructor for the old convention is the combination that
+# works. Vector (API 102) ignores the old constructor and uses the modern
+# no-argument one; LSPosed (API 100) uses the old one. See VectorModule.
 minApiVersion=100
 targetApiVersion=102
 

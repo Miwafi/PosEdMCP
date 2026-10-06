@@ -548,6 +548,38 @@ framework's native API beats asking one of them to emulate the other.
   framework second. The platform route works under both; the framework route is the
   variable one.
 
+### What an API 100 framework does with a modern entry
+
+The tidy story above is not how it went, and the detour is worth keeping because
+none of it is guessable. LSPosed 1.10.2 is an **API 100** framework, and it reads
+`META-INF/xposed/java_init.list` as well — then, crucially, **it does not fall back
+to `assets/xposed_init` when that entry fails**. So an entry it cannot load is not a
+degraded module, it is no module at all:
+
+| declared | what LSPosed 1.10.2 did |
+|---|---|
+| `minApiVersion=101` | refused the module outright: *"this module requires a newer Xposed version (101), so it cannot be activated"* |
+| `minApiVersion=100` | accepted it, found the entry, and constructed it the **pre-101 way** — with `(XposedInterface, ModuleLoadedParam)` as constructor arguments — then died with `NoSuchMethodException` |
+
+So the entry has to be constructible both ways. `VectorModule` has a no-argument
+constructor for 101+ (the framework calls `attachFramework()` and then
+`onModuleLoaded()`) and a two-argument one for 100 (which attaches and adopts
+itself). Being built the second way is also information: that framework predates
+101, and its mature API is the classic one — so that route deliberately leaves
+`Framework` on its classic backend, and the modern hook backend serves only the
+frameworks whose classic support is the thin part.
+
+**And one call had to become reflective.** API 102 changed `attachFramework` to take
+a `Runnable` for hot reload; 101 and before took only the framework. There is no
+single jar that satisfies both — compiling against 101 moves the `NoSuchMethodError`
+to Vector, compiling against 102 leaves it on LSPosed. So that one method is looked
+up and invoked reflectively, picking the arity that exists, and everything else is
+ordinary code.
+
+The result on both devices: Vector constructs the entry the 101 way and runs hooks
+through `XposedInterface`; LSPosed constructs it the 100 way and runs hooks through
+`XposedBridge`. Same APK, same build, no configuration.
+
 **The one thing that did not change is the confirmation gate.** A backend decides how
 a hook is installed, not whether the user is asked.
 
@@ -755,15 +787,13 @@ Zygisk-LSPosed 1.10.2 (7182):
   `LibXposedHookApi` installed a hook that recorded a real `Activity.onResume` on the main
   thread; and the ported clock probe runs whole on it — its preference file, and its three
   alarms read back through its own provider.
+- **And the old one, on the entry it did not expect.** LSPosed 1.10.2 takes the *modern* entry —
+  `java_init.list` wins and there is no fallback — constructs it the pre-101 way, and runs it
+  with the classic hook backend. A scoped app restarted on it is injected again, and `lua_exec`
+  inside that app returns its real `AlarmClockApplication` as a Context. Both devices, one APK.
 
 ### Not yet verified
 
-- **The old device has not been re-tested.** Declaring the modern descriptors can change which
-  entry an older framework picks, and the LSPosed 1.10.2 device was not connected while this
-  was written. The classic entry is untouched, and the modern one declares a floor of API 100
-  targeting 102 so that a framework older than 102 can still take it — but "should be fine" is
-  not the same as measured. Reconnect it, install, and check that its module log still names
-  `PosEdMcpModule`.
 - **The new device's failure path.** There is no test that the modern backend reports a missing
   framework, a hook that will not install, or a chain that throws, the way the classic one does.
 
