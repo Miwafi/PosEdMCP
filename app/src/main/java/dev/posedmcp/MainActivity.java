@@ -46,6 +46,7 @@ import java.util.List;
 
 import dev.posedmcp.Logx;
 import dev.posedmcp.a11y.AccessibilityBridge;
+import dev.posedmcp.a11y.AccessibilityRepair;
 import dev.posedmcp.ipc.BridgeCredentials;
 import dev.posedmcp.mcp.McpTool;
 import dev.posedmcp.state.HookStore;
@@ -87,6 +88,14 @@ public class MainActivity extends AppCompatActivity {
     private final android.os.Handler ui =
             new android.os.Handler(android.os.Looper.getMainLooper());
     private TextView handoffStatus;
+
+    /** Redraws once, after the grace period, so a real fault is not missed. */
+    private final Runnable a11yRecheck = new Runnable() {
+        @Override
+        public void run() {
+            renderStatus();
+        }
+    };
 
     private final Runnable handoffTick = new Runnable() {
         @Override
@@ -182,6 +191,7 @@ public class MainActivity extends AppCompatActivity {
         super.onPause();
         // Nothing on screen to count down for.
         ui.removeCallbacks(handoffTick);
+        ui.removeCallbacks(a11yRecheck);
     }
 
     private void selectTab(int index) {
@@ -212,15 +222,48 @@ public class MainActivity extends AppCompatActivity {
                 Settings.canDrawOverlays(this) ? "granted" : "NOT granted"));
         statusContent.addView(keyValue("Battery",
                 isBatteryExempt() ? "unrestricted" : "OPTIMISED - the service will freeze"));
+        String a11y = AccessibilityBridge.state(this);
+        boolean a11yOn = AccessibilityBridge.STATE_ON.equals(a11y);
+        boolean a11yConnecting = AccessibilityBridge.STATE_CONNECTING.equals(a11y);
+        boolean a11yStuck = AccessibilityBridge.STATE_FAULTED.equals(a11y);
         statusContent.addView(keyValue("Accessibility",
-                AccessibilityBridge.isConnected() ? "enabled" : "NOT enabled"));
-        if (!AccessibilityBridge.isConnected()) {
+                a11yOn ? "enabled"
+                        : a11yConnecting ? "switched on, not connected yet"
+                                : a11yStuck ? "ON BUT NOT RUNNING" : "NOT enabled"));
+
+        if (a11yStuck) {
+            // The distinction matters more than it looks. From the app's side this
+            // is identical to "off", and the obvious fix - turning it on in
+            // Settings - does nothing, because the setting already reads as on.
+            statusContent.addView(body("It is still switched on; the system is simply not"
+                    + " running it, and it will not reconnect on its own. This usually means the"
+                    + " accessibility framework marked the service malfunctioning when this app's"
+                    + " process was killed - which this ROM does on its own schedule - after"
+                    + " which it stops binding it. The switch in Settings already reads as on,"
+                    + " which is why turning it \"on\" there changes nothing: it has to be"
+                    + " switched off and on. Repair does exactly that."));
+            statusContent.addView(outlinedButton("Repair accessibility…",
+                    v -> repairAccessibility()));
+        } else if (a11yConnecting) {
+            statusContent.addView(body("It is switched on and has not attached yet. This page is"
+                    + " a snapshot rather than a live view, so it says this for a moment after the"
+                    + " app restarts. If it still says it in a minute, it is the malfunction"
+                    + " state and Repair is the answer."));
+            // Look again once the grace period is up, so a real fault is not
+            // hidden behind a snapshot taken too early.
+            ui.removeCallbacks(a11yRecheck);
+            ui.postDelayed(a11yRecheck, 11_000L);
+        } else if (!a11yOn) {
             statusContent.addView(body("Accessibility is what keeps this app running: an"
                     + " application hosting an enabled accessibility service holds a system"
                     + " binding, so it is not frozen once it leaves the screen. Without it the MCP"
                     + " endpoint goes silent exactly when an agent in another app tries to use it."
                     + " It is also what provides screen capture, gestures and the view tree"
                     + " without root."));
+        } else {
+            statusContent.addView(body("This is also what keeps the app alive: an application"
+                    + " hosting an enabled accessibility service holds a system binding, so it is"
+                    + " not frozen once it leaves the screen."));
         }
         if (!isBatteryExempt()) {
             statusContent.addView(body("Battery optimisation also freezes the process in the"
@@ -1138,6 +1181,54 @@ public class MainActivity extends AppCompatActivity {
         } catch (Throwable t) {
             toast("Could not open battery settings");
         }
+    }
+
+    /**
+     * Switches a faulted accessibility service off and on, which is the only
+     * thing that clears it.
+     *
+     * <p>A button rather than a tool. An agent quietly re-granting itself an
+     * accessibility service is the shape of thing the confirmation gate exists
+     * to stop, and an agent that thought it needed this could already ask for a
+     * root shell and be told no.
+     */
+    private void repairAccessibility() {
+        AccessibilityRepair.Plan plan = AccessibilityRepair.plan(this);
+        if (plan == null) {
+            toast("Could not read the accessibility settings");
+            return;
+        }
+
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("Repair the accessibility service?")
+                .setMessage("This switches it off and on again. That is the only thing that"
+                        + " clears the system's \"malfunctioning\" mark - the switch in Settings"
+                        + " cannot, because it already reads as on.\n\nTwo root commands, and"
+                        + " nothing else runs:\n\n" + plan.commandWithout() + "\n\n"
+                        + plan.commandFull()
+                        + "\n\nEvery other accessibility service in that list is carried through"
+                        + " unchanged.")
+                .setPositiveButton("Repair", (dialog, which) -> runAccessibilityRepair(plan))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void runAccessibilityRepair(AccessibilityRepair.Plan plan) {
+        toast("Repairing…");
+        new Thread(() -> {
+            String failure = AccessibilityRepair.apply(plan);
+            try {
+                // Let the framework bind it before the page is redrawn, so what
+                // it shows is the result rather than the state it was in.
+                Thread.sleep(1_500L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            runOnUiThread(() -> {
+                toast(failure == null ? "Accessibility repaired" : failure);
+                renderStatus();
+            });
+        }, "posedmcp-a11y-repair").start();
     }
 
     private void ensureNotificationPermission() {

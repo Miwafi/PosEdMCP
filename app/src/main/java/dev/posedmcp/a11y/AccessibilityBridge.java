@@ -2,6 +2,7 @@ package dev.posedmcp.a11y;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.ColorSpace;
 import android.graphics.Path;
@@ -82,9 +83,111 @@ public final class AccessibilityBridge {
         return service != null;
     }
 
+    /** Connected and working. */
+    public static final String STATE_ON = "on";
+    /** Not in the system's enabled list at all - the user has not turned it on. */
+    public static final String STATE_OFF = "off";
+    /**
+     * Listed as enabled, but not running yet.
+     *
+     * <p>Reported for the first few seconds of a process's life, because that is
+     * genuinely what it is: an enabled service takes a moment to attach and the
+     * page is a snapshot, not a live view.
+     */
+    public static final String STATE_CONNECTING = "connecting";
+    /**
+     * Listed as enabled, not running, and it has had time to attach.
+     *
+     * <p>This is its own state because its repair is its own thing. When the
+     * service's connection drops — the process was killed, and this ROM's
+     * cleaner kills it on a schedule — the accessibility framework records it in
+     * {@code mCrashedServices} and then refuses to bind it again. The setting
+     * still says it is on, the switch in Settings is still on, and the only way
+     * back is to switch it off and on again. Reporting that as "not enabled"
+     * sends the user to do the one thing that will not work.
+     */
+    public static final String STATE_FAULTED = "faulted";
+
+    /**
+     * When this process first asked. The grace period runs from here rather than
+     * from process start, which is not knowable from inside the app.
+     */
+    private static final long FIRST_ASKED_AT = android.os.SystemClock.elapsedRealtime();
+    /** Long enough for a service that is merely slow to attach. */
+    private static final long ATTACH_GRACE_MS = 10_000L;
+
+    /** The component the framework tracks, spelled the way the setting spells it. */
+    public static String component(Context ctx) {
+        return ctx.getPackageName() + "/" + PosEdAccessibilityService.class.getName();
+    }
+
+    /**
+     * The raw enabled-services setting, or {@code null} if it cannot be read.
+     *
+     * <p>Queried rather than read through {@code Settings.Secure.getString},
+     * which is a mistake worth recording: that helper keeps a per-process
+     * name/value cache that a write from outside the process does not reliably
+     * invalidate. Measured, an app that removed this service from the setting
+     * saw the removal at once and then did not see it put back — so a user who
+     * repaired accessibility in Settings would have been told forever that it
+     * was still off. The provider is the one that took the write, so asking it
+     * directly is the read that actually reflects what happened.
+     */
+    public static String enabledSetting(Context ctx) {
+        try (android.database.Cursor cursor = ctx.getContentResolver().query(
+                android.provider.Settings.Secure.CONTENT_URI,
+                new String[]{android.provider.Settings.Secure.VALUE},
+                android.provider.Settings.Secure.NAME + "=?",
+                new String[]{android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES},
+                null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                return cursor.getString(0);
+            }
+            return null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** Which of the four states the service is in. */
+    public static String state(Context ctx) {
+        if (isConnected()) {
+            return STATE_ON;
+        }
+        String enabled = enabledSetting(ctx);
+        if (enabled == null || !enabled.contains(component(ctx))) {
+            return STATE_OFF;
+        }
+        // Listed but not running. Two quite different things look identical from
+        // in here - still attaching after a restart, or marked crashed with the
+        // framework refusing to bind it - and nothing the app can call tells
+        // them apart. So a service that has only just been asked about gets the
+        // boring answer, and only one that should have attached long ago is
+        // called a fault.
+        return android.os.SystemClock.elapsedRealtime() - FIRST_ASKED_AT < ATTACH_GRACE_MS
+                ? STATE_CONNECTING : STATE_FAULTED;
+    }
+
     /** Human-readable state for the app UI and the status tool. */
     public static String describe() {
         return service == null ? "not enabled" : "enabled";
+    }
+
+    /** As above, but able to tell "off" apart from "the system gave up on it". */
+    public static String describe(Context ctx) {
+        switch (state(ctx)) {
+            case STATE_ON:
+                return "enabled";
+            case STATE_CONNECTING:
+                return "enabled, not connected yet";
+            case STATE_FAULTED:
+                return "ENABLED but NOT RUNNING - the system is not going to reconnect it on its"
+                        + " own, most likely because it marked the service malfunctioning when"
+                        + " this app's process was killed. It has to be switched off and on"
+                        + " again; the switch in Settings already reads as on.";
+            default:
+                return "not enabled";
+        }
     }
 
     private static AccessibilityService require() throws IOException {

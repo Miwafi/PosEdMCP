@@ -128,6 +128,15 @@ Settings → Battery → App battery management — but **that alone is not enou
 > symptom is the MCP endpoint refusing connections for those couple of seconds and any
 > hooked app's bridge dropping — which looks like a crash and is not one. If it happens
 > often, the battery settings above are the lever worth pulling.
+>
+> **And it can leave the service switched on but dead.** When the process dies, the
+> accessibility framework records the dropped connection as a crash, puts the component in
+> `mCrashedServices`, and stops binding it — while the setting, and the switch in Settings,
+> still read as on. Switching it on there does nothing, because as far as that screen is
+> concerned it is already on; it has to be switched **off and on**. The status tab tells the
+> two apart and offers **Repair accessibility…**, which does the off-and-on over root. That
+> distinction is the whole point of the button: "not enabled" and "on but not running" look
+> identical from inside the app and have opposite fixes.
 
 ### Confirmation policy: what to relax, and what never to
 
@@ -582,6 +591,15 @@ JDK 17+ is required (this project was verified with JDK 22).
   implementations and cannot be used to look up method signatures. Enumerating at runtime
   via `device_info`'s `displayProbe` is the only accurate way.
 
+### And one about `Settings.Secure`
+
+`Settings.Secure.getString` keeps a name/value cache **in the calling process**, and a write
+from anywhere else does not reliably invalidate it. Measured: an app that read the enabled
+accessibility services that way saw this service removed from the setting immediately, and
+then never saw it put back — so a user who had just repaired accessibility would have been
+told forever that it was still off. Query the provider directly instead; it is the one that
+took the write.
+
 ## Status
 
 Verified on OnePlus PLR110 / Android 16 / arm64-v8a / Magisk v27.2-kitsune-4 /
@@ -670,9 +688,20 @@ Zygisk-LSPosed 1.10.2 (7182):
   killed — which is exactly what this ROM had done to it — the countdown came back where it
   was (`ON — 14:21 left` after the restart). The boot time written beside the deadline is
   what keeps a reboot, which should end it, in a different category.
+- **The accessibility state is told apart properly.** After the ROM's cleaner killed the
+  process, the service sat in the framework's crashed set: switched on, not running, and
+  refusing to rebind — the state the user hit and reported as "此服务出现故障". Toggling the
+  component out of `enabled_accessibility_services` and back cleared it (measured: the
+  crashed set went from containing this component to empty, and the service bound again).
+  The status tab now says which state it is in and offers that toggle as a button.
 
 ### Not yet verified
 
+- **The status tab's faulted branch has not been seen on screen.** The state is real — it is
+  what prompted this — but this ROM re-binds the service quickly enough that it could not be
+  held open long enough to read the page, across several attempts to force it (SIGKILL,
+  `force-stop`, `settings put` while stopped). What the branch offers is the same two
+  commands that were run by hand against a genuinely crashed service, and those worked.
 - **Hand-off mode's expiry has not been watched to the end.** Everything around it was: the
   countdown ticks, `module_status` flips on the same comparison, and a restart clears it. But
   sitting on an open gate for a full fifteen minutes to watch the timer reach zero is not a

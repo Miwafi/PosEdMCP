@@ -1480,12 +1480,24 @@ public final class ToolRegistry {
             out.put("bridgePeers", peers);
             out.put("bridgePort", bridge.port());
             out.put("mcpPort", prefs.mcpPort());
-            out.put("accessibility", AccessibilityBridge.describe());
+            out.put("accessibility", AccessibilityBridge.describe(context));
             if (!AccessibilityBridge.isConnected()) {
                 out.put("accessibilityHint",
                         "Without the accessibility service the platform freezes this app once it"
                                 + " leaves the screen, so the MCP endpoint stops answering exactly"
                                 + " when an agent in another app needs it.");
+                if (AccessibilityBridge.STATE_FAULTED.equals(AccessibilityBridge.state(context))) {
+                    // Worth saying precisely, because the obvious advice is wrong:
+                    // the setting already reads as on, so "turn it on" does
+                    // nothing and the user concludes the app is broken.
+                    out.put("accessibilityRepair",
+                            "The service is still switched on, but the system marked it"
+                                    + " malfunctioning - it does that whenever this app's process"
+                                    + " is killed - and will not bind it again. Turning it on in"
+                                    + " Settings will not help; it has to be switched off and on."
+                                    + " The user can do that in the app: Status tab,"
+                                    + " \"Repair accessibility…\".");
+                }
             }
             out.put("confirmations", confirmationsJson());
             if (capabilities.systemOnline()) {
