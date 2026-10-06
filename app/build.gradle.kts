@@ -71,6 +71,15 @@ dependencies {
     // Provided by LSPosed at runtime; never packaged into the APK.
     compileOnly("de.robv.android.xposed:api:82")
 
+    // And the framework that replaces it. Vector (LSPosed's rewrite, same author)
+    // is natively a libxposed API 102 framework: it still loads classic modules,
+    // but through a compatibility bridge that is demonstrably thinner than the
+    // real thing - AndroidAppHelper.currentApplication() returns null there,
+    // which is what made lua_exec's app.context() nil. Declaring both lets each
+    // framework load the entry it is actually built for, instead of asking one
+    // of them to emulate the other.
+    compileOnly("io.github.libxposed:api:102.0.0")
+
     // Material 3 for the app's own screen. AppCompat comes with it: a Material3
     // theme is an AppCompat theme, so the activity has to be an
     // AppCompatActivity for the widgets to pick up their styling. Both bring

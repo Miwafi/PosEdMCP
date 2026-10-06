@@ -131,6 +131,13 @@ public final class AppHost {
                         args.optLong("max_instructions", LuaRuntime.DEFAULT_MAX_INSTRUCTIONS));
             });
             bridge.registerHandler("ping", args -> new JSONObject().put("pong", true)
+                    // Which hook framework loaded us, and therefore which HookApi
+                    // every hook in this process is built on. Read here rather
+                    // than in the app process on purpose: this class runs inside
+                    // the injected process, where the framework's own classes
+                    // exist. The app process has neither API on its classpath, so
+                    // asking it would mean loading classes that are not there.
+                    .put("framework", Framework.describe())
                     .put("hooks", HookRegistry.snapshot().size()));
             bridge.start();
             client = bridge;
@@ -148,11 +155,42 @@ public final class AppHost {
 
     /**
      * The target application's own Context, or {@code null} while it is still
-     * starting. Reached through the framework's helper rather than anything we
-     * are handed, because a plugin and a script both need it and neither is
-     * given one by the loader.
+     * starting.
+     *
+     * <p>Asked of the platform first, and of the hook framework second. The
+     * framework route is the obvious one - it is what the API is for - but it is
+     * also the one that varies: on Vector, which loads classic modules through a
+     * compatibility bridge, {@code AndroidAppHelper.currentApplication()}
+     * returns null, so every script that needed a Context found nil here. The
+     * platform route has no such dependency: the Application is a public object
+     * that {@code ActivityThread} has been willing to hand out since forever.
+     * Measured working under both frameworks.
+     *
+     * <p>No caching. It is null before the Application exists, and the module is
+     * often loaded before that; a cached null would be permanent.
      */
     static Context currentApplication() {
+        Context viaActivityThread = applicationFromActivityThread();
+        return viaActivityThread != null ? viaActivityThread : applicationFromAppHelper();
+    }
+
+    /** The Application straight out of the platform's own activity thread. */
+    private static Context applicationFromActivityThread() {
+        try {
+            Class<?> activityThread = Class.forName("android.app.ActivityThread");
+            Object thread = activityThread.getMethod("currentActivityThread").invoke(null);
+            if (thread == null) {
+                return null;
+            }
+            Object application = thread.getClass().getMethod("getApplication").invoke(thread);
+            return application instanceof Context ? (Context) application : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** The framework's helper, for frameworks where it works. */
+    private static Context applicationFromAppHelper() {
         try {
             return (Context) XposedHelpers.callStaticMethod(
                     Class.forName("android.app.AndroidAppHelper"), "currentApplication");

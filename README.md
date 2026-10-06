@@ -505,6 +505,61 @@ An app with several processes (the clock has a main process and `:clockWidget`) 
 each as `package:pid`; a plugin is loaded into whichever process, and calls are routed
 there.
 
+## Two backends, and why the framework picks one
+
+The module is injected by an Xposed framework, and there are now two of those in
+circulation: the classic `de.robv.android.xposed` API from 2012, and
+`io.github.libxposed.api`, the redesign that Vector — LSPosed rewritten by the same
+author — is built on. So the module ships **two entry points** and does not choose
+between them:
+
+| | declared by | entry class |
+|---|---|---|
+| classic | `assets/xposed_init` | `PosEdMcpModule implements IXposedHookLoadPackage` |
+| modern | `META-INF/xposed/java_init.list` + `module.prop` | `VectorModule extends XposedModule` |
+
+Whichever the framework invokes is the backend, and that is not a preference that
+could be expressed any other way: the classic entry is handed an `XposedBridge`, the
+modern one is handed an `XposedInterface`, and neither can reach the other's. Which
+one you get was decided by who called you. Both then do exactly the same thing —
+hand the same class loader to the same `SystemHooks` and `AppHost` — so there is one
+implementation of what this module does and two ways of being started.
+
+**What forced it.** Vector still loads classic modules, through a compatibility
+bridge (`VectorLegacyBridge` in its logs), and that bridge is thinner than the real
+thing. Measured on Vector 2.2: `AndroidAppHelper.currentApplication()` returns null
+there, so `lua_exec`'s `app.context()` was always nil and every script that needed a
+Context — a ContentResolver, a package manager — simply could not be written. The
+framework's own release notes describe the legacy bridge as the fragile half: they
+record a release where "modules loaded, and then nothing happened" because R8 had
+merged a class that `XposedHelpers.findClass` touches on its way in. Running on each
+framework's native API beats asking one of them to emulate the other.
+
+**The parts that differ** are small, because hooking was already behind an interface:
+
+- `Framework` is the seam. Both entries record themselves there; `HookRegistry` and
+  `app.hook` ask it for a `HookApi` without caring which arrives.
+- `LibXposedHookApi` is the second implementation. Two things are genuinely
+  different: the modern API has **no `setResult`** — an interceptor either calls
+  `chain.proceed()` or answers for the method by returning without calling it, which
+  is what `setResult` meant — and arguments travel with `proceed(args)` rather than
+  in a shared array. Both are reconciled in about thirty lines.
+- `AppHost.currentApplication()` asks the platform first (`ActivityThread`) and the
+  framework second. The platform route works under both; the framework route is the
+  variable one.
+
+**The one thing that did not change is the confirmation gate.** A backend decides how
+a hook is installed, not whether the user is asked.
+
+> **Reinstalling the module needs the framework to re-read the APK.** The daemon
+> caches the module's path and descriptors, and an install moves the APK to a new
+> `~~hash` directory, so the cached path goes bad — Vector logs
+> `XSharedPreferences: Apk parser fails: NoSuchFileException` and keeps using the old
+> entry. On LSPosed the answer is a reboot. On Vector there is a lighter one:
+> `/data/adb/modules/zygisk_vector/cli modules disable dev.posedmcp` then
+> `... enable dev.posedmcp` makes the daemon re-read it, and the next process started
+> gets the new code.
+
 ## How credentials reach the module
 
 This is the most convoluted part of the project, because **Android has every out-of-band
@@ -694,8 +749,23 @@ Zygisk-LSPosed 1.10.2 (7182):
   component out of `enabled_accessibility_services` and back cleared it (measured: the
   crashed set went from containing this component to empty, and the service bound again).
   The status tab now says which state it is in and offers that toggle as a button.
+- **The second backend, on Vector 2.2**: the framework loads `VectorModule` through
+  `VectorModuleManager` rather than pushing the classic entry through `VectorLegacyBridge`;
+  `app.context()` returns the clock's real `DeskClockApp` where it had always been nil;
+  `LibXposedHookApi` installed a hook that recorded a real `Activity.onResume` on the main
+  thread; and the ported clock probe runs whole on it — its preference file, and its three
+  alarms read back through its own provider.
 
 ### Not yet verified
+
+- **The old device has not been re-tested.** Declaring the modern descriptors can change which
+  entry an older framework picks, and the LSPosed 1.10.2 device was not connected while this
+  was written. The classic entry is untouched, and the modern one declares a floor of API 100
+  targeting 102 so that a framework older than 102 can still take it — but "should be fine" is
+  not the same as measured. Reconnect it, install, and check that its module log still names
+  `PosEdMcpModule`.
+- **The new device's failure path.** There is no test that the modern backend reports a missing
+  framework, a hook that will not install, or a chain that throws, the way the classic one does.
 
 - **The status tab's faulted branch has not been seen on screen.** The state is real — it is
   what prompted this — but this ROM re-binds the service quickly enough that it could not be

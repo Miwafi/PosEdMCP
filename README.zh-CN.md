@@ -406,6 +406,49 @@ app.native.error()            上一次 dlopen/dlsym 的错误
 多个进程的应用（闹钟有主进程和 `:clockWidget`）以 `包名:pid` 分别登记；插件装在哪个
 进程，调用就路由到哪个。
 
+## 两个后端，以及为什么由框架来选
+
+注入本模块的是 Xposed 框架，而现在流通的有两代：2012 年的经典
+`de.robv.android.xposed`，和 `io.github.libxposed.api`——Vector（同一位作者对
+LSPosed 的重写）就建立在后者之上。所以模块发布了**两个入口**，并且不在它们之间做选择：
+
+| | 由谁声明 | 入口类 |
+|---|---|---|
+| 经典 | `assets/xposed_init` | `PosEdMcpModule implements IXposedHookLoadPackage` |
+| 现代 | `META-INF/xposed/java_init.list` + `module.prop` | `VectorModule extends XposedModule` |
+
+框架调用哪个，后端就是哪个——而这也不是能用别的方式表达出来的偏好：经典入口拿到的是
+`XposedBridge`，现代入口拿到的是 `XposedInterface`，两者互相够不到。你会得到哪一个，是
+**调用你的那一方决定的**。两个入口随后做的事完全一样——把同一个类加载器交给同一个
+`SystemHooks` 和 `AppHost`，所以这个模块只有一份实现、两种被启动的方式。
+
+**是什么逼出了这件事。** Vector 仍然能加载经典模块，但走的是一个兼容桥（它日志里的
+`VectorLegacyBridge`），而那个桥比真货薄。在 Vector 2.2 上实测：
+`AndroidAppHelper.currentApplication()` 返回 null，于是 `lua_exec` 里 `app.context()`
+永远是 nil，任何需要 Context 的脚本——ContentResolver、PackageManager——根本写不了。
+框架自己的发行说明就把这个兼容桥称为脆弱的那一半：它记录过一个版本"模块加载了，然后什么
+都没发生"，原因是 R8 把 `XposedHelpers.findClass` 路上会碰到的类合并掉了。跑在各自的原生
+API 上，好过让其中一个去模拟另一个。
+
+**不同的部分很小**，因为钩子早就已经在接口后面了：
+
+- `Framework` 是那道缝。两个入口都在那里登记自己；`HookRegistry` 和 `app.hook` 只管向它
+  要一个 `HookApi`，不关心拿到的是哪个。
+- `LibXposedHookApi` 是第二份实现。真正不同的只有两点：现代 API **没有 `setResult`**
+  ——拦截器要么调 `chain.proceed()`，要么不调而直接返回一个值，这正是 `setResult` 的含义；
+  参数是随 `proceed(args)` 走的，不在一个共享数组里。这两点在三十行里就对齐了。
+- `AppHost.currentApplication()` 先问平台（`ActivityThread`），再问框架。平台那条路在前
+  后两代上都成立；框架那条路才是会变的那个。
+
+**唯一没有改变的是确认闸门。** 后端决定的是"钩子怎么装上去"，不是"要不要问你"。
+
+> **重装模块之后，必须让框架重新读一次 APK。** daemon 缓存着模块的路径和描述符，而安装会把
+> APK 挪到新的 `~~hash` 目录，缓存路径于是失效——Vector 会打
+> `XSharedPreferences: Apk parser fails: NoSuchFileException`，然后继续用旧入口。
+> 在 LSPosed 上的答案是重启手机；Vector 上有个更轻的办法：
+> `/data/adb/modules/zygisk_vector/cli modules disable dev.posedmcp` 再
+> `... enable dev.posedmcp`，daemon 就会重读，之后新起的进程拿到的就是新代码。
+
 ## 凭据是怎么送到模块手里的
 
 这是本项目里最绕的一段，因为 **Android 把带外通道全堵死了**：
@@ -549,8 +592,20 @@ Zygisk-LSPosed 1.10.2 (7182) 上验证：
   集合里：开着、没在跑、也拒绝重新绑定——就是用户遇到并报告为"此服务出现故障"的那个状态。
   把该组件从 `enabled_accessibility_services` 里摘掉再放回就清掉了（实测：crashed 集合从
   含该组件变成空，服务重新绑定）。状态页现在会说明处在哪种状态，并把那次关开做成按钮。
+- **第二个后端，在 Vector 2.2 上**：框架改由 `VectorModuleManager` 加载 `VectorModule`，
+  不再把经典入口塞进 `VectorLegacyBridge`；`app.context()` 拿到了时钟真实的
+  `DeskClockApp`（此前一直是 nil）；`LibXposedHookApi` 装的钩子在 `main` 线程上抓到了真实的
+  `Activity.onResume` 调用；搬过来的时钟探针也完整跑通——它的 prefs 文件，以及通过它自己的
+  provider 读回的三条闹钟。
 
 ### 尚未验证
+
+- **旧设备没有回归过。** 声明现代描述符可能改变旧框架挑哪个入口，而写这段时那台
+  LSPosed 1.10.2 并不在线。经典入口一个字没动，现代入口的下限写的是 API 100、目标 102，
+  所以比 102 老的框架仍然能接——但"应该没问题"不等于"测过"。把它连上、装一次、确认它的
+  模块日志里仍然出现 `PosEdMcpModule`。
+- **新设备的失败路径。** 没有测试覆盖现代后端在"框架缺失""钩子装不上""链条抛异常"时的
+  表现，而经典那条路是有的。
 
 - **状态页上"故障"那一支没在屏幕上看到过。** 那个状态是真的——正是它引出了这次改动——但这台
   ROM 重新绑定服务太快，试了多种造法（SIGKILL、`force-stop`、应用停止时写设置）都没能把它

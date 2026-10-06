@@ -199,7 +199,7 @@ public final class HookRegistry {
         String className = entry.className;
         String methodName = entry.methodName;
 
-        HookApi api = new XposedHookApi(appClassLoader);
+        HookApi api = Framework.hookApi(appClassLoader);
         HookApi.Callback callback = new HookApi.Callback() {
             @Override
             public void before(HookApi.HookParam param) {

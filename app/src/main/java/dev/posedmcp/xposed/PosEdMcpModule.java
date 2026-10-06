@@ -24,9 +24,6 @@ import dev.posedmcp.Logx;
  */
 public class PosEdMcpModule implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
-    private static final String SYSTEM_PACKAGE = "android";
-    private static final String SYSTEM_PROCESS = "system_server";
-
     @Override
     public void initZygote(StartupParam startupParam) {
         // Nothing is done this early: API 101+ forbids injecting into zygote
@@ -39,10 +36,15 @@ public class PosEdMcpModule implements IXposedHookLoadPackage, IXposedHookZygote
             return;
         }
         try {
+            // Recorded before anything else, because it decides which HookApi
+            // every later hook is built on - and this is a framework older than
+            // the modern one, or the module would not have been started here.
+            Framework.adoptClassic("API " + XposedBridge.getXposedVersion());
+
             String packageName = lpparam.packageName;
             String processName = lpparam.processName;
 
-            if (isSystemServer(packageName, processName)) {
+            if (Framework.isSystemServer(packageName, processName)) {
                 log("installing system hooks in " + processName + " (for " + packageName + ")");
                 SystemHooks.install(lpparam.classLoader);
                 return;
@@ -52,48 +54,6 @@ public class PosEdMcpModule implements IXposedHookLoadPackage, IXposedHookZygote
             AppHost.install(packageName, lpparam.classLoader);
         } catch (Throwable t) {
             Logx.e("handleLoadPackage failed for " + safeName(lpparam), t);
-        }
-    }
-
-    /**
-     * Whether this callback is for system_server.
-     *
-     * <p>Classic Xposed reports system_server as package {@code android}, and this
-     * module originally tested for exactly that - which is why the system hooks
-     * were never installed: LSPosed instead delivered the callback with the name
-     * of whichever system package was loading, and {@code AppHost} took it.
-     *
-     * <p>Three signals are checked, cheapest first, because getting this wrong
-     * silently downgrades every system-level feature.
-     */
-    private static boolean isSystemServer(String packageName, String processName) {
-        if (SYSTEM_PACKAGE.equals(packageName)) {
-            return true;
-        }
-        if (SYSTEM_PROCESS.equals(processName) || "system".equals(processName)) {
-            return true;
-        }
-        return SYSTEM_PROCESS.equals(processNameFromCmdline());
-    }
-
-    /**
-     * Reads this process's own name from {@code /proc}, which is authoritative
-     * and does not depend on what the framework chose to pass us.
-     */
-    private static String processNameFromCmdline() {
-        try (java.io.FileInputStream in = new java.io.FileInputStream("/proc/self/cmdline")) {
-            byte[] buffer = new byte[128];
-            int read = in.read(buffer);
-            if (read <= 0) {
-                return null;
-            }
-            int end = 0;
-            while (end < read && buffer[end] != 0) {
-                end++;
-            }
-            return new String(buffer, 0, end, java.nio.charset.StandardCharsets.UTF_8);
-        } catch (Throwable t) {
-            return null;
         }
     }
 

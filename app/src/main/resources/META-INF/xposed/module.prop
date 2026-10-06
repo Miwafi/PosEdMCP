@@ -1,0 +1,14 @@
+# Module metadata for frameworks that speak the modern libxposed API (Vector).
+#
+# minApiVersion is deliberately below targetApiVersion: a framework older than
+# 102 can still load this module and simply does not offer the newer callbacks,
+# which is exactly how API versioning is meant to work. 100 is the first
+# libxposed API, so nothing older can read this file at all - those frameworks
+# keep loading the classic entry named in assets/xposed_init.
+minApiVersion=100
+targetApiVersion=102
+
+# Whether the scope below is a fixed contract rather than a suggestion. Left
+# false on purpose: which applications this module is injected into is the
+# user's decision, made in the manager, and it differs per device.
+staticScope=false
